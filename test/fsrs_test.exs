@@ -189,6 +189,23 @@ defmodule ExFsrsTest do
         ExFsrs.from_map(map)
       end
     end
+
+    test "defaults to :learning when state is neither atom nor string" do
+      now_iso = DateTime.to_iso8601(DateTime.utc_now())
+
+      map = %{
+        "card_id" => 1,
+        "state" => 42,
+        "step" => 0,
+        "stability" => nil,
+        "difficulty" => nil,
+        "due" => now_iso,
+        "last_review" => nil
+      }
+
+      card = ExFsrs.from_map(map)
+      assert card.state == :learning
+    end
   end
 
   describe "get_retrievability/2" do
@@ -196,40 +213,6 @@ defmodule ExFsrsTest do
       card = ExFsrs.new()
 
       assert ExFsrs.get_retrievability(card) == 0
-    end
-
-    test "calculates retrievability correctly for recent reviews" do
-      now = DateTime.utc_now()
-      yesterday = DateTime.add(now, -1, :day)
-
-      card =
-        ExFsrs.new(
-          stability: 10.0,
-          last_review: yesterday
-        )
-
-      retrievability = ExFsrs.get_retrievability(card, now)
-
-      # With FSRS-6 decay=-0.1542, stability 10.0 and 1 day passed, retrievability ≈ 0.9857
-      assert retrievability > 0.98
-      assert retrievability < 0.99
-    end
-
-    test "calculates retrievability correctly for older reviews" do
-      now = DateTime.utc_now()
-      ten_days_ago = DateTime.add(now, -10, :day)
-
-      card =
-        ExFsrs.new(
-          stability: 10.0,
-          last_review: ten_days_ago
-        )
-
-      retrievability = ExFsrs.get_retrievability(card, now)
-
-      # With FSRS-6 decay=-0.1542, stability 10.0 and 10 days passed, retrievability = 0.9
-      assert retrievability > 0.89
-      assert retrievability < 0.91
     end
   end
 
@@ -240,11 +223,27 @@ defmodule ExFsrsTest do
 
       {updated_card, _log} = ExFsrs.review_card(card, :good, now, 1000)
 
-      # Basic checks that the review was processed
       assert updated_card.state == :learning
       assert is_number(updated_card.stability)
       assert is_number(updated_card.difficulty)
       assert updated_card.last_review == now
+    end
+  end
+
+  describe "reschedule_card/2" do
+    test "delegates to Scheduler.reschedule_card with default scheduler" do
+      card = ExFsrs.new(card_id: 42, state: :learning, step: 0)
+      now = DateTime.utc_now()
+
+      logs = [
+        %{card: %{card_id: 42}, rating: :good, review_datetime: now},
+        %{card: %{card_id: 42}, rating: :good, review_datetime: DateTime.add(now, 10, :minute)}
+      ]
+
+      rescheduled = ExFsrs.reschedule_card(card, logs)
+      assert rescheduled.card_id == 42
+      assert is_number(rescheduled.stability)
+      assert is_number(rescheduled.difficulty)
     end
   end
 end

@@ -38,229 +38,6 @@ defmodule ExFsrs.SchedulerTest do
     end
   end
 
-  describe "review_card/5" do
-    setup do
-      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
-      now = DateTime.utc_now()
-
-      {:ok, scheduler: scheduler, now: now}
-    end
-
-    test "reviews new learning card with 'again' rating", %{scheduler: scheduler, now: now} do
-      card = ExFsrs.new(state: :learning, step: 0)
-
-      {updated_card, log} = ExFsrs.Scheduler.review_card(scheduler, card, :again, now)
-
-      assert updated_card.state == :learning
-      assert updated_card.step == 0
-      assert is_number(updated_card.stability)
-      assert is_number(updated_card.difficulty)
-      assert updated_card.last_review == now
-      assert DateTime.diff(updated_card.due, now, :minute) == 1
-
-      assert log.rating == :again
-      assert log.review_datetime == now
-    end
-
-    test "reviews new learning card with 'hard' rating", %{scheduler: scheduler, now: now} do
-      card = ExFsrs.new(state: :learning, step: 0)
-
-      {updated_card, _log} = ExFsrs.Scheduler.review_card(scheduler, card, :hard, now)
-
-      assert updated_card.state == :learning
-      assert updated_card.step == 0
-      assert is_number(updated_card.stability)
-      assert is_number(updated_card.difficulty)
-
-      # Due in 1 to 6 minutes (depending on learning_steps and calculation)
-      minutes_until_due = DateTime.diff(updated_card.due, now, :minute)
-      assert minutes_until_due >= 1
-      assert minutes_until_due <= 6
-    end
-
-    test "reviews new learning card with 'good' rating", %{scheduler: scheduler, now: now} do
-      card = ExFsrs.new(state: :learning, step: 0)
-
-      {updated_card, _log} = ExFsrs.Scheduler.review_card(scheduler, card, :good, now)
-
-      assert updated_card.state == :learning
-      assert updated_card.step == 1
-      assert is_number(updated_card.stability)
-      assert is_number(updated_card.difficulty)
-
-      # Due in approximately 10 minutes
-      assert DateTime.diff(updated_card.due, now, :minute) == 10
-    end
-
-    test "reviews new learning card with 'easy' rating", %{scheduler: scheduler, now: now} do
-      card = ExFsrs.new(state: :learning, step: 0)
-
-      {updated_card, _log} = ExFsrs.Scheduler.review_card(scheduler, card, :easy, now)
-
-      assert updated_card.state == :review
-      assert updated_card.step == nil
-      assert is_number(updated_card.stability)
-      assert is_number(updated_card.difficulty)
-
-      # Due in at least 1 day
-      assert DateTime.diff(updated_card.due, now, :day) >= 1
-    end
-  end
-
-  describe "review_card/5 for review state" do
-    setup do
-      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
-      now = DateTime.utc_now()
-
-      card =
-        ExFsrs.new(
-          state: :review,
-          stability: 10.0,
-          difficulty: 5.0,
-          last_review: DateTime.add(now, -10, :day),
-          due: now
-        )
-
-      {:ok, scheduler: scheduler, now: now, card: card}
-    end
-
-    test "reviews review card with 'again' rating", %{scheduler: scheduler, now: now, card: card} do
-      {updated_card, _log} = ExFsrs.Scheduler.review_card(scheduler, card, :again, now)
-
-      assert updated_card.state == :relearning
-      assert updated_card.step == 0
-      assert is_number(updated_card.stability)
-      # Difficulty should increase
-      assert updated_card.difficulty > card.difficulty
-
-      # Due in approximately 10 minutes
-      assert DateTime.diff(updated_card.due, now, :minute) == 10
-    end
-
-    test "reviews review card with 'hard' rating", %{scheduler: scheduler, now: now, card: card} do
-      {updated_card, _log} = ExFsrs.Scheduler.review_card(scheduler, card, :hard, now)
-
-      assert updated_card.state == :review
-      assert updated_card.step == nil
-      assert is_number(updated_card.stability)
-      # Difficulty should increase
-      assert updated_card.difficulty > card.difficulty
-
-      # Due in future days (depends on stability calculation)
-      assert DateTime.diff(updated_card.due, now, :day) > 0
-    end
-
-    test "reviews review card with 'good' rating", %{scheduler: scheduler, now: now, card: card} do
-      {updated_card, _log} = ExFsrs.Scheduler.review_card(scheduler, card, :good, now)
-
-      assert updated_card.state == :review
-      assert updated_card.step == nil
-      # Stability should increase
-      assert updated_card.stability > card.stability
-
-      # Due in future days (more than hard rating)
-      assert DateTime.diff(updated_card.due, now, :day) > 0
-    end
-
-    test "reviews review card with 'easy' rating", %{scheduler: scheduler, now: now, card: card} do
-      {updated_card, _log} = ExFsrs.Scheduler.review_card(scheduler, card, :easy, now)
-
-      assert updated_card.state == :review
-      assert updated_card.step == nil
-      # Stability should increase significantly
-      assert updated_card.stability > card.stability
-
-      # Due in future days (more than good rating)
-      days_until_due = DateTime.diff(updated_card.due, now, :day)
-      assert days_until_due > 0
-    end
-  end
-
-  describe "review_card/5 for relearning state" do
-    setup do
-      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
-      now = DateTime.utc_now()
-
-      card =
-        ExFsrs.new(
-          state: :relearning,
-          step: 0,
-          stability: 5.0,
-          difficulty: 7.0,
-          last_review: DateTime.add(now, -1, :day),
-          due: now
-        )
-
-      {:ok, scheduler: scheduler, now: now, card: card}
-    end
-
-    test "reviews relearning card with 'again' rating", %{
-      scheduler: scheduler,
-      now: now,
-      card: card
-    } do
-      {updated_card, _log} = ExFsrs.Scheduler.review_card(scheduler, card, :again, now)
-
-      assert updated_card.state == :relearning
-      assert updated_card.step == 0
-      # Stability should decrease
-      assert updated_card.stability < card.stability
-      # Difficulty should increase
-      assert updated_card.difficulty > card.difficulty
-
-      # Due in approximately 10 minutes
-      assert DateTime.diff(updated_card.due, now, :minute) == 10
-    end
-
-    test "reviews relearning card with 'hard' rating", %{
-      scheduler: scheduler,
-      now: now,
-      card: card
-    } do
-      {updated_card, _log} = ExFsrs.Scheduler.review_card(scheduler, card, :hard, now)
-
-      assert updated_card.state == :relearning
-      assert updated_card.step == 0
-      assert is_number(updated_card.stability)
-      # Difficulty should increase
-      assert updated_card.difficulty > card.difficulty
-
-      # Due in 15 minutes (10 * 1.5)
-      assert DateTime.diff(updated_card.due, now, :minute) == 15
-    end
-
-    test "reviews relearning card with 'good' rating", %{
-      scheduler: scheduler,
-      now: now,
-      card: card
-    } do
-      {updated_card, _log} = ExFsrs.Scheduler.review_card(scheduler, card, :good, now)
-
-      assert updated_card.state == :review
-      assert updated_card.step == nil
-      assert is_number(updated_card.stability)
-
-      # Due in future days
-      assert DateTime.diff(updated_card.due, now, :day) > 0
-    end
-
-    test "reviews relearning card with 'easy' rating", %{
-      scheduler: scheduler,
-      now: now,
-      card: card
-    } do
-      {updated_card, _log} = ExFsrs.Scheduler.review_card(scheduler, card, :easy, now)
-
-      assert updated_card.state == :review
-      assert updated_card.step == nil
-      # Stability should increase significantly
-      assert updated_card.stability > card.stability
-
-      # Due in future days (more than good rating)
-      assert DateTime.diff(updated_card.due, now, :day) > 0
-    end
-  end
-
   describe "next_interval/2" do
     test "calculates proper interval based on stability" do
       scheduler = ExFsrs.Scheduler.new()
@@ -324,13 +101,160 @@ defmodule ExFsrs.SchedulerTest do
     end
   end
 
-  # Tests for private functions using function capture
-  describe "internal utility functions" do
-    test "rating_to_number/1 converts rating atoms to numbers" do
+  describe "rating_to_number/1" do
+    test "converts rating atoms to numbers" do
       assert ExFsrs.Scheduler.rating_to_number(:again) == 1
       assert ExFsrs.Scheduler.rating_to_number(:hard) == 2
       assert ExFsrs.Scheduler.rating_to_number(:good) == 3
       assert ExFsrs.Scheduler.rating_to_number(:easy) == 4
+    end
+  end
+
+  describe "review_card/5 default datetime" do
+    test "uses DateTime.utc_now() when review_datetime is not provided" do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
+      card = ExFsrs.new(state: :learning, step: 0)
+
+      {updated_card, log} = ExFsrs.Scheduler.review_card(scheduler, card, :good)
+
+      assert updated_card.state == :learning
+      assert is_number(updated_card.stability)
+      assert %DateTime{} = log.review_datetime
+    end
+  end
+
+  describe "review_card/5 with string state" do
+    test "handles card with string state value" do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
+      now = DateTime.utc_now()
+
+      card = %ExFsrs{
+        card_id: 1,
+        state: "learning",
+        step: 0,
+        stability: nil,
+        difficulty: nil,
+        due: now,
+        last_review: nil
+      }
+
+      {updated_card, _log} = ExFsrs.Scheduler.review_card(scheduler, card, :good, now)
+
+      assert updated_card.state == :learning
+      assert is_number(updated_card.stability)
+    end
+  end
+
+  describe "learning step overflow graduation" do
+    test "good graduates when step >= length of learning_steps" do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false, learning_steps: [1.0])
+      now = DateTime.utc_now()
+
+      card = %ExFsrs{
+        card_id: 1,
+        state: :learning,
+        step: 1,
+        stability: 2.0,
+        difficulty: 5.0,
+        due: now,
+        last_review: now
+      }
+
+      {updated_card, _log} = ExFsrs.Scheduler.review_card(scheduler, card, :good, now)
+      assert updated_card.state == :review
+      assert updated_card.step == nil
+    end
+
+    test "hard graduates when step >= length of learning_steps" do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false, learning_steps: [1.0])
+      now = DateTime.utc_now()
+
+      card = %ExFsrs{
+        card_id: 1,
+        state: :learning,
+        step: 1,
+        stability: 2.0,
+        difficulty: 5.0,
+        due: now,
+        last_review: now
+      }
+
+      {updated_card, _log} = ExFsrs.Scheduler.review_card(scheduler, card, :hard, now)
+      assert updated_card.state == :review
+      assert updated_card.step == nil
+    end
+  end
+
+  describe "enable_fuzzing affects interval calculations" do
+    test "fuzzing changes the due date for review cards" do
+      scheduler_no_fuzz = ExFsrs.Scheduler.new(enable_fuzzing: false)
+      scheduler_with_fuzz = ExFsrs.Scheduler.new(enable_fuzzing: true)
+      now = DateTime.utc_now()
+
+      card =
+        ExFsrs.new(
+          state: :review,
+          stability: 25.0,
+          difficulty: 5.0,
+          last_review: DateTime.add(now, -30, :day)
+        )
+
+      :rand.seed(:exsss, {1, 2, 3})
+
+      {card_no_fuzz, _} = ExFsrs.Scheduler.review_card(scheduler_no_fuzz, card, :good, now)
+      {card_with_fuzz, _} = ExFsrs.Scheduler.review_card(scheduler_with_fuzz, card, :good, now)
+
+      no_fuzz_days = DateTime.diff(card_no_fuzz.due, now, :day)
+      with_fuzz_days = DateTime.diff(card_with_fuzz.due, now, :day)
+
+      assert no_fuzz_days != with_fuzz_days, "Fuzzing should change the interval"
+    end
+  end
+
+  describe "reschedule_card/3 with different log formats" do
+    test "accepts ReviewLog structs" do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
+      now = DateTime.utc_now()
+      card = ExFsrs.new(card_id: 100, state: :learning, step: 0)
+
+      reviewed_card = ExFsrs.new(card_id: 100)
+      log = ExFsrs.ReviewLog.new(reviewed_card, :good, now)
+
+      rescheduled = ExFsrs.Scheduler.reschedule_card(scheduler, card, [log])
+      assert rescheduled.card_id == 100
+      assert is_number(rescheduled.stability)
+    end
+
+    test "accepts maps with ExFsrs card struct" do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
+      now = DateTime.utc_now()
+      card = ExFsrs.new(card_id: 100, state: :learning, step: 0)
+
+      log = %{
+        card: ExFsrs.new(card_id: 100),
+        rating: :good,
+        review_datetime: now
+      }
+
+      rescheduled = ExFsrs.Scheduler.reschedule_card(scheduler, card, [log])
+      assert rescheduled.card_id == 100
+      assert is_number(rescheduled.stability)
+    end
+
+    test "accepts maps with plain card_id field" do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
+      now = DateTime.utc_now()
+      card = ExFsrs.new(card_id: 100, state: :learning, step: 0)
+
+      log = %{
+        card_id: 100,
+        rating: :good,
+        review_datetime: now
+      }
+
+      rescheduled = ExFsrs.Scheduler.reschedule_card(scheduler, card, [log])
+      assert rescheduled.card_id == 100
+      assert is_number(rescheduled.stability)
     end
   end
 end

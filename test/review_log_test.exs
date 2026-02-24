@@ -96,5 +96,90 @@ defmodule ExFsrs.ReviewLogTest do
         ExFsrs.ReviewLog.from_map(map)
       end
     end
+
+    test "defaults to DateTime.utc_now() when review_datetime is nil" do
+      card_map = %{
+        "card_id" => 12_345,
+        "state" => "review",
+        "step" => nil,
+        "stability" => 10.0,
+        "difficulty" => 5.0,
+        "due" => DateTime.to_iso8601(DateTime.utc_now()),
+        "last_review" => nil
+      }
+
+      map = %{
+        "card" => card_map,
+        "rating" => "good",
+        "review_datetime" => nil,
+        "review_duration" => nil
+      }
+
+      log = ExFsrs.ReviewLog.from_map(map)
+      assert %DateTime{} = log.review_datetime
+    end
+
+    test "passes through already-parsed DateTime values" do
+      now = DateTime.utc_now()
+
+      card_map = %{
+        "card_id" => 12_345,
+        "state" => "review",
+        "step" => nil,
+        "stability" => 10.0,
+        "difficulty" => 5.0,
+        "due" => DateTime.to_iso8601(now),
+        "last_review" => nil
+      }
+
+      map = %{
+        "card" => card_map,
+        "rating" => "good",
+        "review_datetime" => now,
+        "review_duration" => nil
+      }
+
+      log = ExFsrs.ReviewLog.from_map(map)
+      assert log.review_datetime == now
+    end
+
+    test "defaults rating to :good when value is not atom or string" do
+      now_iso = DateTime.to_iso8601(DateTime.utc_now())
+
+      card_map = %{
+        "card_id" => 12_345,
+        "state" => "review",
+        "step" => nil,
+        "stability" => 10.0,
+        "difficulty" => 5.0,
+        "due" => now_iso,
+        "last_review" => nil
+      }
+
+      map = %{
+        "card" => card_map,
+        "rating" => 42,
+        "review_datetime" => now_iso,
+        "review_duration" => nil
+      }
+
+      log = ExFsrs.ReviewLog.from_map(map)
+      assert log.rating == :good
+    end
+
+    test "creates default card when card data is nil" do
+      now_iso = DateTime.to_iso8601(DateTime.utc_now())
+
+      map = %{
+        "card" => nil,
+        "rating" => "good",
+        "review_datetime" => now_iso,
+        "review_duration" => nil
+      }
+
+      log = ExFsrs.ReviewLog.from_map(map)
+      assert %ExFsrs{} = log.card
+      assert log.card.state == :learning
+    end
   end
 end
