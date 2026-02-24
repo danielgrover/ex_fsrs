@@ -1,0 +1,411 @@
+defmodule ExFsrs.AlgorithmValidationTest do
+  @moduledoc """
+  Algorithm validation tests with golden values sourced from external FSRS-6
+  implementations (ts-fsrs and py-fsrs) to cross-validate our implementation.
+
+  Sources:
+    - ts-fsrs: packages/fsrs/__tests__/FSRS-6.test.ts, algorithm.test.ts
+    - py-fsrs: tests/test_basic.py
+    - fsrs-rs: src/inference.rs
+  """
+  use ExUnit.Case, async: true
+
+  @start_datetime ~U[2022-11-29 12:30:00Z]
+
+  # --- 1. First Review Output Validation ---
+  # Source: ts-fsrs FSRS-6.test.ts "first repeat"
+  describe "first review output validation (ts-fsrs golden values)" do
+    setup do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
+      card = ExFsrs.new(state: :learning, step: 0)
+      {:ok, scheduler: scheduler, card: card, now: @start_datetime}
+    end
+
+    test "again: stability=0.212, difficulty=6.4133, state=learning, interval=0 days", ctx do
+      {card, _log} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :again, ctx.now)
+
+      assert_in_delta card.stability, 0.212, 0.0001
+      assert_in_delta card.difficulty, 6.4133, 0.0001
+      assert card.state == :learning
+      assert DateTime.diff(card.due, ctx.now, :day) == 0
+    end
+
+    test "hard: stability=1.2931, difficulty=5.1122, state=learning, interval=0 days", ctx do
+      {card, _log} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :hard, ctx.now)
+
+      assert_in_delta card.stability, 1.2931, 0.0001
+      assert_in_delta card.difficulty, 5.1122, 0.01
+      assert card.state == :learning
+      assert DateTime.diff(card.due, ctx.now, :day) == 0
+    end
+
+    test "good: stability=2.3065, difficulty=2.1181, state=learning, interval=0 days", ctx do
+      {card, _log} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :good, ctx.now)
+
+      assert_in_delta card.stability, 2.3065, 0.0001
+      assert_in_delta card.difficulty, 2.1181, 0.01
+      assert card.state == :learning
+      assert DateTime.diff(card.due, ctx.now, :day) == 0
+    end
+
+    test "easy: stability=8.2956, difficulty=1.0 (clamped), state=review, interval=8 days", ctx do
+      {card, _log} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :easy, ctx.now)
+
+      assert_in_delta card.stability, 8.2956, 0.0001
+      assert card.difficulty == 1.0
+      assert card.state == :review
+      assert DateTime.diff(card.due, ctx.now, :day) == 8
+    end
+  end
+
+  # --- 2. Forgetting Curve Precision ---
+  # Source: ts-fsrs algorithm.test.ts "forgetting_curve"
+  # With stability=1.0, decay=-0.1542 (default w[20]):
+  #   elapsed=0 -> R=1.0, elapsed=1 -> R=0.9, elapsed=2 -> R=0.84588465, elapsed=3 -> R=0.8093881
+  describe "forgetting curve precision (ts-fsrs golden values)" do
+    test "retrievability at multiple elapsed times with stability=1.0" do
+      card =
+        ExFsrs.new(
+          state: :review,
+          stability: 1.0,
+          difficulty: 5.0,
+          last_review: @start_datetime
+        )
+
+      scheduler = ExFsrs.Scheduler.new()
+
+      cases = [
+        {0, 1.0},
+        {1, 0.9},
+        {2, 0.84588465},
+        {3, 0.8093881}
+      ]
+
+      for {elapsed_days, expected_r} <- cases do
+        review_at = DateTime.add(@start_datetime, elapsed_days, :day)
+        r = ExFsrs.Scheduler.get_retrievability(card, review_at, scheduler)
+
+        assert_in_delta r,
+                        expected_r,
+                        0.001,
+                        "R at elapsed=#{elapsed_days}: expected #{expected_r}, got #{r}"
+      end
+    end
+  end
+
+  # --- 3. Retrievability for Non-Review States ---
+  describe "retrievability for non-review states" do
+    test "new card with nil last_review returns 0" do
+      card = ExFsrs.new(state: :learning, step: 0)
+      assert ExFsrs.get_retrievability(card, @start_datetime) == 0
+    end
+
+    test "card with last_review at elapsed=0 returns 1.0 (no decay)" do
+      card =
+        ExFsrs.new(
+          state: :learning,
+          stability: 2.0,
+          difficulty: 5.0,
+          last_review: @start_datetime
+        )
+
+      scheduler = ExFsrs.Scheduler.new()
+      r = ExFsrs.Scheduler.get_retrievability(card, @start_datetime, scheduler)
+      assert_in_delta r, 1.0, 0.0001
+    end
+  end
+
+  # --- 4. next_interval Across Retention Rates ---
+  # Source: ts-fsrs algorithm.test.ts "next_interval" with stability=1.0
+  # Also fsrs-rs test_next_interval (f32 values; we use f64 like ts-fsrs)
+  describe "next_interval across retention rates (ts-fsrs golden values)" do
+    test "stability=1.0 with varying desired_retention" do
+      # Golden values from ts-fsrs algorithm.test.ts
+      expected = [
+        {0.5, 90},
+        {0.6, 27},
+        {0.7, 9},
+        {0.8, 3},
+        {0.9, 1},
+        {1.0, 1}
+      ]
+
+      for {retention, expected_interval} <- expected do
+        scheduler =
+          ExFsrs.Scheduler.new(
+            desired_retention: retention,
+            maximum_interval: 36_500_000
+          )
+
+        result = ExFsrs.Scheduler.next_interval(1.0, scheduler)
+
+        assert result == expected_interval,
+               "next_interval(1.0) with retention=#{retention}: expected #{expected_interval}, got #{result}"
+      end
+    end
+
+    test "stability=10.0 at default retention 0.9 returns 10" do
+      scheduler = ExFsrs.Scheduler.new()
+      assert ExFsrs.Scheduler.next_interval(10.0, scheduler) == 10
+    end
+  end
+
+  # --- 5. Stability Update Ordering ---
+  # Source: ts-fsrs algorithm.test.ts "next_ds" and FSRS design invariant
+  # For a review-state card: s_again < original < s_hard < s_good < s_easy
+  describe "stability update ordering (ts-fsrs)" do
+    test "s_again < original < s_hard < s_good < s_easy for review card" do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
+
+      card =
+        ExFsrs.new(
+          state: :review,
+          stability: 10.0,
+          difficulty: 5.0,
+          last_review: DateTime.add(@start_datetime, -10, :day)
+        )
+
+      {card_again, _} = ExFsrs.Scheduler.review_card(scheduler, card, :again, @start_datetime)
+      {card_hard, _} = ExFsrs.Scheduler.review_card(scheduler, card, :hard, @start_datetime)
+      {card_good, _} = ExFsrs.Scheduler.review_card(scheduler, card, :good, @start_datetime)
+      {card_easy, _} = ExFsrs.Scheduler.review_card(scheduler, card, :easy, @start_datetime)
+
+      assert card_again.stability < 10.0,
+             "again stability #{card_again.stability} should be < 10.0"
+
+      assert card_again.stability < card_hard.stability,
+             "again #{card_again.stability} should be < hard #{card_hard.stability}"
+
+      assert card_hard.stability < card_good.stability,
+             "hard #{card_hard.stability} should be < good #{card_good.stability}"
+
+      assert card_good.stability < card_easy.stability,
+             "good #{card_good.stability} should be < easy #{card_easy.stability}"
+    end
+  end
+
+  # --- 6. Difficulty Update Sequence ---
+  # Source: ts-fsrs algorithm.test.ts "next_difficulty" starting from d=5.0
+  # Again->8.34176237, Hard->6.66599536, Good->4.99022837, Easy->3.31446137
+  describe "difficulty update sequence (ts-fsrs golden values)" do
+    test "difficulty changes from d=5.0 match ts-fsrs reference" do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
+
+      card =
+        ExFsrs.new(
+          state: :review,
+          stability: 10.0,
+          difficulty: 5.0,
+          last_review: DateTime.add(@start_datetime, -10, :day)
+        )
+
+      {card_again, _} = ExFsrs.Scheduler.review_card(scheduler, card, :again, @start_datetime)
+      {card_hard, _} = ExFsrs.Scheduler.review_card(scheduler, card, :hard, @start_datetime)
+      {card_good, _} = ExFsrs.Scheduler.review_card(scheduler, card, :good, @start_datetime)
+      {card_easy, _} = ExFsrs.Scheduler.review_card(scheduler, card, :easy, @start_datetime)
+
+      assert_in_delta card_again.difficulty, 8.34176237, 0.01
+      assert_in_delta card_hard.difficulty, 6.66599536, 0.01
+      assert_in_delta card_good.difficulty, 4.99022837, 0.01
+      assert_in_delta card_easy.difficulty, 3.31446137, 0.01
+    end
+
+    test "difficulty stays clamped in [1.0, 10.0] after extreme ratings" do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
+
+      card_high =
+        ExFsrs.new(
+          state: :review,
+          stability: 10.0,
+          difficulty: 9.5,
+          last_review: DateTime.add(@start_datetime, -10, :day)
+        )
+
+      {card_again, _} =
+        ExFsrs.Scheduler.review_card(scheduler, card_high, :again, @start_datetime)
+
+      assert card_again.difficulty <= 10.0
+
+      card_low =
+        ExFsrs.new(
+          state: :review,
+          stability: 10.0,
+          difficulty: 1.5,
+          last_review: DateTime.add(@start_datetime, -10, :day)
+        )
+
+      {card_easy, _} = ExFsrs.Scheduler.review_card(scheduler, card_low, :easy, @start_datetime)
+      assert card_easy.difficulty >= 1.0
+    end
+  end
+
+  # --- 7. Short-Term vs Long-Term Stability Paths ---
+  # FSRS-6 uses short-term stability formula when elapsed < 1 day,
+  # long-term formula otherwise. Same card + same rating should differ.
+  describe "short-term vs long-term stability paths" do
+    test "same card, same rating, different elapsed time produces different stability" do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
+
+      base_card =
+        ExFsrs.new(
+          state: :review,
+          stability: 10.0,
+          difficulty: 5.0,
+          last_review: @start_datetime
+        )
+
+      # Short-term: review same day (< 1 day elapsed)
+      same_day = DateTime.add(@start_datetime, 6, :hour)
+      {short_term_card, _} = ExFsrs.Scheduler.review_card(scheduler, base_card, :good, same_day)
+
+      # Long-term: review after 10 days
+      ten_days = DateTime.add(@start_datetime, 10, :day)
+      {long_term_card, _} = ExFsrs.Scheduler.review_card(scheduler, base_card, :good, ten_days)
+
+      assert short_term_card.stability != long_term_card.stability,
+             "Short-term #{short_term_card.stability} should differ from long-term #{long_term_card.stability}"
+    end
+  end
+
+  # --- 8. Decay and Factor Computation ---
+  # Validates scheduler struct fields computed from w[20]
+  describe "decay and factor computation" do
+    test "default w[20]=0.1542 produces decay=-0.1542 and valid factor" do
+      scheduler = ExFsrs.Scheduler.new()
+
+      # decay = -w[20]
+      assert scheduler.decay == -0.1542
+
+      # The defining identity: (1 + factor)^decay must equal 0.9
+      assert_in_delta :math.pow(1 + scheduler.factor, scheduler.decay), 0.9, 0.0001
+    end
+
+    test "custom w[20]=0.3 produces decay=-0.3 and valid factor" do
+      params = [
+        0.212,
+        1.2931,
+        2.3065,
+        8.2956,
+        6.4133,
+        0.8334,
+        3.0194,
+        0.001,
+        1.8722,
+        0.1666,
+        0.796,
+        1.4835,
+        0.0614,
+        0.2629,
+        1.6483,
+        0.6014,
+        1.8729,
+        0.5425,
+        0.0912,
+        0.0658,
+        0.3
+      ]
+
+      scheduler = ExFsrs.Scheduler.new(parameters: params)
+
+      assert scheduler.decay == -0.3
+      assert_in_delta :math.pow(1 + scheduler.factor, scheduler.decay), 0.9, 0.0001
+    end
+
+    test "different w[20] values produce different factors" do
+      default_scheduler = ExFsrs.Scheduler.new()
+
+      custom_params = [
+        0.212,
+        1.2931,
+        2.3065,
+        8.2956,
+        6.4133,
+        0.8334,
+        3.0194,
+        0.001,
+        1.8722,
+        0.1666,
+        0.796,
+        1.4835,
+        0.0614,
+        0.2629,
+        1.6483,
+        0.6014,
+        1.8729,
+        0.5425,
+        0.0912,
+        0.0658,
+        0.3
+      ]
+
+      custom_scheduler = ExFsrs.Scheduler.new(parameters: custom_params)
+
+      assert default_scheduler.factor != custom_scheduler.factor
+    end
+  end
+
+  # --- 9. Fuzzing Boundary Tests ---
+  # Source: py-fsrs test_fuzz, ts-fsrs algorithm.test.ts apply_fuzz
+  describe "fuzzing boundary tests" do
+    test "interval < 2.5 returns rounded original with no randomness" do
+      results = for _ <- 1..50, do: ExFsrs.Scheduler.get_fuzzed_interval(2.0)
+      assert Enum.all?(results, &(&1 == 2))
+
+      results = for _ <- 1..50, do: ExFsrs.Scheduler.get_fuzzed_interval(1.0)
+      assert Enum.all?(results, &(&1 == 1))
+    end
+
+    test "interval at 2.5 begins fuzzing (values vary)" do
+      results = for _ <- 1..100, do: ExFsrs.Scheduler.get_fuzzed_interval(2.5)
+
+      # Should have variation (not all the same value)
+      assert MapSet.size(MapSet.new(results)) > 1,
+             "Fuzzed values at 2.5 should vary, got: #{inspect(Enum.uniq(results))}"
+
+      # All values should be reasonable (around 2-5)
+      assert Enum.all?(results, &(&1 >= 2 and &1 <= 5))
+    end
+
+    test "fuzz respects maximum_interval" do
+      max_ivl = 5
+      results = for _ <- 1..100, do: ExFsrs.Scheduler.get_fuzzed_interval(10.0, max_ivl)
+      assert Enum.all?(results, &(&1 <= max_ivl))
+    end
+
+    test "fuzzed intervals for interval=10 stay within expected range" do
+      # Cumulative delta for interval=10:
+      #   base=1.0 + 0.15*(7-2.5) + 0.1*(10-7) = 1.0 + 0.675 + 0.3 = 1.975
+      # min_ivl = max(2, round(10-1.975)) = 8
+      # max_ivl = round(10+1.975) = 12
+      results = for _ <- 1..100, do: ExFsrs.Scheduler.get_fuzzed_interval(10.0)
+
+      {min_val, max_val} = Enum.min_max(results)
+
+      assert min_val >= 8,
+             "Min fuzzed value should be >= 8, got #{min_val}"
+
+      assert max_val <= 13,
+             "Max fuzzed value should be <= 13, got #{max_val}"
+    end
+  end
+
+  # --- 10. Parameter Validation ---
+  describe "parameter validation" do
+    test "20 parameters raises ArgumentError" do
+      assert_raise ArgumentError, ~r/expected 21 parameters, got 20/, fn ->
+        ExFsrs.Scheduler.new(parameters: List.duplicate(1.0, 20))
+      end
+    end
+
+    test "22 parameters raises ArgumentError" do
+      assert_raise ArgumentError, ~r/expected 21 parameters, got 22/, fn ->
+        ExFsrs.Scheduler.new(parameters: List.duplicate(1.0, 22))
+      end
+    end
+
+    test "exactly 21 parameters succeeds" do
+      scheduler = ExFsrs.Scheduler.new(parameters: List.duplicate(1.0, 21))
+      assert length(scheduler.parameters) == 21
+    end
+  end
+end
