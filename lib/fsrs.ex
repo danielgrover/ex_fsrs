@@ -68,7 +68,7 @@ defmodule ExFsrs do
 
     %{
       "card_id" => card.card_id,
-      "state" => card.state,
+      "state" => Atom.to_string(card.state),
       "step" => card.step,
       "stability" => card.stability,
       "difficulty" => card.difficulty,
@@ -147,11 +147,7 @@ defmodule ExFsrs do
   def get_retrievability(%__MODULE__{last_review: nil}, _current_datetime), do: 0
 
   def get_retrievability(%__MODULE__{} = card, current_datetime) do
-    days_since_last_review = max(0, DateTime.diff(current_datetime, card.last_review, :day))
-
-    decay = -0.1542
-    factor = :math.pow(0.9, 1 / decay) - 1
-    :math.pow(1 + factor * days_since_last_review / card.stability, decay)
+    ExFsrs.Scheduler.get_retrievability(card, current_datetime, ExFsrs.Scheduler.new())
   end
 
   @doc """

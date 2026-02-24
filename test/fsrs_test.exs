@@ -57,7 +57,7 @@ defmodule ExFsrsTest do
       map = ExFsrs.to_map(card)
 
       assert map["card_id"] == 12_345
-      assert map["state"] == :review
+      assert map["state"] == "review"
       assert map["step"] == 2
       assert map["stability"] == 10.5
       assert map["difficulty"] == 4.2

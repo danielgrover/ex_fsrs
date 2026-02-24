@@ -167,6 +167,35 @@ defmodule ExFsrs.ReviewLogTest do
       assert log.rating == :good
     end
 
+    test "creates review log from map with atom keys" do
+      now = DateTime.utc_now()
+      now_iso = DateTime.to_iso8601(now)
+
+      card_map = %{
+        "card_id" => 12_345,
+        "state" => "review",
+        "step" => nil,
+        "stability" => 10.0,
+        "difficulty" => 5.0,
+        "due" => now_iso,
+        "last_review" => now_iso
+      }
+
+      map = %{
+        card: card_map,
+        rating: :good,
+        review_datetime: now,
+        review_duration: 1000
+      }
+
+      log = ExFsrs.ReviewLog.from_map(map)
+
+      assert log.card.card_id == 12_345
+      assert log.rating == :good
+      assert log.review_datetime == now
+      assert log.review_duration == 1000
+    end
+
     test "creates default card when card data is nil" do
       now_iso = DateTime.to_iso8601(DateTime.utc_now())
 

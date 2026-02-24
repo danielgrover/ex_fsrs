@@ -26,7 +26,22 @@ defmodule ExFsrs.ReferenceTest do
 
   describe "py-fsrs test_review_card" do
     test "interval history matches reference for Good*6, Again*2, Good*5" do
-      ratings = [:good, :good, :good, :good, :good, :good, :again, :again, :good, :good, :good, :good, :good]
+      ratings = [
+        :good,
+        :good,
+        :good,
+        :good,
+        :good,
+        :good,
+        :again,
+        :again,
+        :good,
+        :good,
+        :good,
+        :good,
+        :good
+      ]
+
       {_card, intervals} = review_sequence(ratings)
 
       assert intervals == [0, 2, 11, 46, 163, 498, 0, 0, 2, 4, 7, 12, 21]
@@ -65,7 +80,21 @@ defmodule ExFsrs.ReferenceTest do
 
   describe "py-fsrs test_custom_scheduler_args" do
     test "explicit defaults produce same intervals as implicit defaults" do
-      ratings = [:good, :good, :good, :good, :good, :good, :again, :again, :good, :good, :good, :good, :good]
+      ratings = [
+        :good,
+        :good,
+        :good,
+        :good,
+        :good,
+        :good,
+        :again,
+        :again,
+        :good,
+        :good,
+        :good,
+        :good,
+        :good
+      ]
 
       {_card, intervals} =
         review_sequence(ratings,
@@ -118,7 +147,6 @@ defmodule ExFsrs.ReferenceTest do
 
   describe "py-fsrs test_retrievability" do
     test "returns 0.9 when elapsed_days equals stability" do
-
       card =
         ExFsrs.new(
           state: :review,
@@ -215,7 +243,11 @@ defmodule ExFsrs.ReferenceTest do
       assert DateTime.diff(card.due, now, :minute) == 1
     end
 
-    test "hard stays at current step with interpolated interval", %{scheduler: scheduler, card: card, now: now} do
+    test "hard stays at current step with interpolated interval", %{
+      scheduler: scheduler,
+      card: card,
+      now: now
+    } do
       {card, _} = ExFsrs.Scheduler.review_card(scheduler, card, :hard, now)
       assert card.state == :learning
       assert card.step == 0
@@ -521,11 +553,27 @@ defmodule ExFsrs.ReferenceTest do
 
       # Reschedule with different parameters
       different_params = [
-        0.1, 0.7, 1.5, 6.0,
-        5.5, 0.5, 2.0, 0.01,
-        1.5, 0.2, 0.9, 1.2,
-        0.05, 0.3, 1.5, 0.7,
-        1.5, 0.6, 0.1, 0.07, 0.16
+        0.1,
+        0.7,
+        1.5,
+        6.0,
+        5.5,
+        0.5,
+        2.0,
+        0.01,
+        1.5,
+        0.2,
+        0.9,
+        1.2,
+        0.05,
+        0.3,
+        1.5,
+        0.7,
+        1.5,
+        0.6,
+        0.1,
+        0.07,
+        0.16
       ]
 
       different_scheduler =

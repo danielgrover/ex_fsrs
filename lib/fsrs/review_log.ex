@@ -72,7 +72,7 @@ defmodule ExFsrs.ReviewLog do
   """
   def from_map(map) do
     # Extract review_datetime
-    review_datetime_value = map["review_datetime"]
+    review_datetime_value = map["review_datetime"] || map[:review_datetime]
 
     review_datetime =
       cond do
@@ -100,7 +100,7 @@ defmodule ExFsrs.ReviewLog do
       end
 
     # Extract card
-    card_data = map["card"]
+    card_data = map["card"] || map[:card]
 
     card =
       cond do
@@ -109,7 +109,7 @@ defmodule ExFsrs.ReviewLog do
       end
 
     # Extract review_duration
-    review_duration = map["review_duration"]
+    review_duration = map["review_duration"] || map[:review_duration]
 
     # Create the structure
     %__MODULE__{

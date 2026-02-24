@@ -49,7 +49,6 @@ defmodule ExFsrs.Scheduler do
           relearning_steps: [float()],
           maximum_interval: integer(),
           enable_fuzzing: boolean(),
-          default_parameters: [float()],
           decay: float(),
           factor: float()
         }
@@ -60,7 +59,6 @@ defmodule ExFsrs.Scheduler do
             relearning_steps: @relearning_steps,
             maximum_interval: @maximum_interval,
             enable_fuzzing: true,
-            default_parameters: @default_parameters,
             decay: nil,
             factor: nil
 
@@ -81,6 +79,11 @@ defmodule ExFsrs.Scheduler do
   """
   def new(opts \\ []) do
     parameters = Keyword.get(opts, :parameters, @default_parameters)
+
+    if length(parameters) != 21 do
+      raise ArgumentError, "expected 21 parameters, got #{length(parameters)}"
+    end
+
     desired_retention = Keyword.get(opts, :desired_retention, 0.9)
     learning_steps = Keyword.get(opts, :learning_steps, @learning_steps)
     relearning_steps = Keyword.get(opts, :relearning_steps, @relearning_steps)
@@ -97,7 +100,6 @@ defmodule ExFsrs.Scheduler do
       relearning_steps: relearning_steps,
       maximum_interval: maximum_interval,
       enable_fuzzing: enable_fuzzing,
-      default_parameters: parameters,
       decay: decay,
       factor: factor
     }
@@ -127,7 +129,7 @@ defmodule ExFsrs.Scheduler do
       if is_atom(card.state) do
         card.state
       else
-        String.to_atom(card.state)
+        String.to_existing_atom(card.state)
       end
 
     updated_card =
@@ -137,12 +139,7 @@ defmodule ExFsrs.Scheduler do
         :relearning -> update_relearning_card(card, rating, review_datetime, scheduler)
       end
 
-    review_log = %{
-      card: updated_card,
-      rating: rating,
-      review_datetime: review_datetime,
-      review_duration: review_duration
-    }
+    review_log = ExFsrs.ReviewLog.new(card, rating, review_datetime, review_duration)
 
     {updated_card, review_log}
   end
@@ -342,7 +339,7 @@ defmodule ExFsrs.Scheduler do
 
   defp compute_stability_difficulty(card, rating, review_datetime, scheduler) do
     cond do
-      is_nil(card.stability) and is_nil(card.difficulty) ->
+      is_nil(card.stability) or is_nil(card.difficulty) ->
         {initial_stability(rating, scheduler), initial_difficulty(rating, scheduler)}
 
       days_since_last_review(card, review_datetime) < 1 ->
@@ -447,7 +444,7 @@ defmodule ExFsrs.Scheduler do
     w4 - :math.exp(w5 * (rating_to_number(rating) - 1)) + 1
   end
 
-  def next_stability(difficulty, stability, retrievability, rating, scheduler) do
+  defp next_stability(difficulty, stability, retrievability, rating, scheduler) do
     result =
       case rating do
         :again -> next_forget_stability(difficulty, stability, retrievability, scheduler)
@@ -569,9 +566,13 @@ defmodule ExFsrs.Scheduler do
     end)
 
     sorted_logs =
-      Enum.sort_by(review_logs, fn log ->
-        extract_review_datetime(log)
-      end, DateTime)
+      Enum.sort_by(
+        review_logs,
+        fn log ->
+          extract_review_datetime(log)
+        end,
+        DateTime
+      )
 
     rescheduled = ExFsrs.new(card_id: card_id, due: card.due)
 
@@ -594,7 +595,7 @@ defmodule ExFsrs.Scheduler do
   defp extract_review_datetime(%ExFsrs.ReviewLog{review_datetime: dt}), do: dt
   defp extract_review_datetime(%{review_datetime: dt}), do: dt
 
-  def rating_to_number(rating) do
+  defp rating_to_number(rating) do
     case rating do
       :again -> 1
       :hard -> 2
@@ -605,12 +606,15 @@ defmodule ExFsrs.Scheduler do
 
   defp days_since_last_review(card, review_datetime) do
     case card.last_review do
-      nil -> nil
+      nil -> -1
       last_review -> DateTime.diff(review_datetime, last_review, :day)
     end
   end
 
-  defp get_retrievability(card, review_datetime, scheduler) do
+  @doc """
+  Calculates the retrievability of a card at a given time.
+  """
+  def get_retrievability(card, review_datetime, scheduler) do
     case card.last_review do
       nil ->
         0

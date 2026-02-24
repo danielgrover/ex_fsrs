@@ -1,6 +1,5 @@
 defmodule ExFsrs.SchedulerTest do
   use ExUnit.Case, async: true
-  doctest ExFsrs.Scheduler
 
   describe "new/1" do
     test "creates new scheduler with default parameters" do
@@ -35,6 +34,12 @@ defmodule ExFsrs.SchedulerTest do
       assert scheduler.relearning_steps == [20.0]
       assert scheduler.maximum_interval == 1000
       assert scheduler.enable_fuzzing == false
+    end
+
+    test "raises on wrong parameter count" do
+      assert_raise ArgumentError, ~r/expected 21 parameters, got 5/, fn ->
+        ExFsrs.Scheduler.new(parameters: [1.0, 2.0, 3.0, 4.0, 5.0])
+      end
     end
   end
 
@@ -101,15 +106,6 @@ defmodule ExFsrs.SchedulerTest do
     end
   end
 
-  describe "rating_to_number/1" do
-    test "converts rating atoms to numbers" do
-      assert ExFsrs.Scheduler.rating_to_number(:again) == 1
-      assert ExFsrs.Scheduler.rating_to_number(:hard) == 2
-      assert ExFsrs.Scheduler.rating_to_number(:good) == 3
-      assert ExFsrs.Scheduler.rating_to_number(:easy) == 4
-    end
-  end
-
   describe "review_card/5 default datetime" do
     test "uses DateTime.utc_now() when review_datetime is not provided" do
       scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
@@ -142,6 +138,48 @@ defmodule ExFsrs.SchedulerTest do
 
       assert updated_card.state == :learning
       assert is_number(updated_card.stability)
+    end
+  end
+
+  describe "review_card/5 with partial nil stability/difficulty" do
+    test "treats card with only stability nil as initial" do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
+      now = DateTime.utc_now()
+
+      card = %ExFsrs{
+        card_id: 1,
+        state: :learning,
+        step: 0,
+        stability: nil,
+        difficulty: 5.0,
+        due: now,
+        last_review: nil
+      }
+
+      {updated_card, _log} = ExFsrs.Scheduler.review_card(scheduler, card, :good, now)
+
+      assert is_number(updated_card.stability)
+      assert is_number(updated_card.difficulty)
+    end
+
+    test "treats card with only difficulty nil as initial" do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
+      now = DateTime.utc_now()
+
+      card = %ExFsrs{
+        card_id: 1,
+        state: :learning,
+        step: 0,
+        stability: 2.0,
+        difficulty: nil,
+        due: now,
+        last_review: nil
+      }
+
+      {updated_card, _log} = ExFsrs.Scheduler.review_card(scheduler, card, :good, now)
+
+      assert is_number(updated_card.stability)
+      assert is_number(updated_card.difficulty)
     end
   end
 
