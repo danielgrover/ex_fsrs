@@ -30,14 +30,14 @@ defmodule ExFsrs.ReviewLogTest do
 
   describe "to_map/1" do
     test "converts review log to map with all fields" do
-      card = ExFsrs.new(card_id: 12345)
+      card = ExFsrs.new(card_id: 12_345)
       now = DateTime.utc_now()
       duration = 1000
 
       log = ExFsrs.ReviewLog.new(card, :good, now, duration)
       map = ExFsrs.ReviewLog.to_map(log)
 
-      assert map["card"]["card_id"] == 12345
+      assert map["card"]["card_id"] == 12_345
       assert map["rating"] == :good
       assert map["review_datetime"] == DateTime.to_iso8601(now)
       assert map["review_duration"] == duration
@@ -50,7 +50,7 @@ defmodule ExFsrs.ReviewLogTest do
       now_iso = DateTime.to_iso8601(now)
 
       card_map = %{
-        "card_id" => 12345,
+        "card_id" => 12_345,
         "state" => "review",
         "step" => nil,
         "stability" => 10.0,
@@ -68,7 +68,7 @@ defmodule ExFsrs.ReviewLogTest do
 
       log = ExFsrs.ReviewLog.from_map(map)
 
-      assert log.card.card_id == 12345
+      assert log.card.card_id == 12_345
       assert log.rating == :good
       assert DateTime.to_iso8601(log.review_datetime) == now_iso
       assert log.review_duration == 1000
@@ -76,7 +76,7 @@ defmodule ExFsrs.ReviewLogTest do
 
     test "raises error on invalid review_datetime" do
       card_map = %{
-        "card_id" => 12345,
+        "card_id" => 12_345,
         "state" => "review",
         "step" => nil,
         "stability" => 10.0,

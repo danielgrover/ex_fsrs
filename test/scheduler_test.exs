@@ -10,10 +10,10 @@ defmodule ExFsrs.SchedulerTest do
       assert scheduler.desired_retention == 0.9
       assert scheduler.learning_steps == [1.0, 10.0]
       assert scheduler.relearning_steps == [10.0]
-      assert scheduler.maximum_interval == 36500
+      assert scheduler.maximum_interval == 36_500
       assert scheduler.enable_fuzzing == true
-      assert scheduler.decay != nil
-      assert scheduler.factor != nil
+      assert is_float(scheduler.decay)
+      assert is_float(scheduler.factor)
     end
 
     test "creates new scheduler with custom parameters" do
@@ -53,8 +53,8 @@ defmodule ExFsrs.SchedulerTest do
 
       assert updated_card.state == :learning
       assert updated_card.step == 0
-      assert updated_card.stability != nil
-      assert updated_card.difficulty != nil
+      assert is_number(updated_card.stability)
+      assert is_number(updated_card.difficulty)
       assert updated_card.last_review == now
       assert DateTime.diff(updated_card.due, now, :minute) == 1
 
@@ -69,8 +69,8 @@ defmodule ExFsrs.SchedulerTest do
 
       assert updated_card.state == :learning
       assert updated_card.step == 0
-      assert updated_card.stability != nil
-      assert updated_card.difficulty != nil
+      assert is_number(updated_card.stability)
+      assert is_number(updated_card.difficulty)
 
       # Due in 1 to 6 minutes (depending on learning_steps and calculation)
       minutes_until_due = DateTime.diff(updated_card.due, now, :minute)
@@ -85,8 +85,8 @@ defmodule ExFsrs.SchedulerTest do
 
       assert updated_card.state == :learning
       assert updated_card.step == 1
-      assert updated_card.stability != nil
-      assert updated_card.difficulty != nil
+      assert is_number(updated_card.stability)
+      assert is_number(updated_card.difficulty)
 
       # Due in approximately 10 minutes
       assert DateTime.diff(updated_card.due, now, :minute) == 10
@@ -99,8 +99,8 @@ defmodule ExFsrs.SchedulerTest do
 
       assert updated_card.state == :review
       assert updated_card.step == nil
-      assert updated_card.stability != nil
-      assert updated_card.difficulty != nil
+      assert is_number(updated_card.stability)
+      assert is_number(updated_card.difficulty)
 
       # Due in at least 1 day
       assert DateTime.diff(updated_card.due, now, :day) >= 1
@@ -129,7 +129,7 @@ defmodule ExFsrs.SchedulerTest do
 
       assert updated_card.state == :relearning
       assert updated_card.step == 0
-      assert updated_card.stability != nil
+      assert is_number(updated_card.stability)
       # Difficulty should increase
       assert updated_card.difficulty > card.difficulty
 
@@ -142,7 +142,7 @@ defmodule ExFsrs.SchedulerTest do
 
       assert updated_card.state == :review
       assert updated_card.step == nil
-      assert updated_card.stability != nil
+      assert is_number(updated_card.stability)
       # Difficulty should increase
       assert updated_card.difficulty > card.difficulty
 
@@ -221,7 +221,7 @@ defmodule ExFsrs.SchedulerTest do
 
       assert updated_card.state == :relearning
       assert updated_card.step == 0
-      assert updated_card.stability != nil
+      assert is_number(updated_card.stability)
       # Difficulty should increase
       assert updated_card.difficulty > card.difficulty
 
@@ -238,7 +238,7 @@ defmodule ExFsrs.SchedulerTest do
 
       assert updated_card.state == :review
       assert updated_card.step == nil
-      assert updated_card.stability != nil
+      assert is_number(updated_card.stability)
 
       # Due in future days
       assert DateTime.diff(updated_card.due, now, :day) > 0

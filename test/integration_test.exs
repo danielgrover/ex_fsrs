@@ -10,8 +10,8 @@ defmodule ExFsrs.IntegrationTest do
       {card, log1} = ExFsrs.review_card(card, :good)
       assert card.state == :learning
       assert card.step == 1
-      assert card.stability != nil
-      assert card.difficulty != nil
+      assert is_number(card.stability)
+      assert is_number(card.difficulty)
       assert log1.rating == :good
 
       # Move time forward 10 minutes

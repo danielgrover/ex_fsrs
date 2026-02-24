@@ -20,7 +20,7 @@ defmodule ExFsrsTest do
 
       card =
         ExFsrs.new(
-          card_id: 12345,
+          card_id: 12_345,
           state: :review,
           step: 2,
           stability: 10.5,
@@ -29,7 +29,7 @@ defmodule ExFsrsTest do
           last_review: now
         )
 
-      assert card.card_id == 12345
+      assert card.card_id == 12_345
       assert card.state == :review
       assert card.step == 2
       assert card.stability == 10.5
@@ -45,7 +45,7 @@ defmodule ExFsrsTest do
 
       card =
         ExFsrs.new(
-          card_id: 12345,
+          card_id: 12_345,
           state: :review,
           step: 2,
           stability: 10.5,
@@ -56,7 +56,7 @@ defmodule ExFsrsTest do
 
       map = ExFsrs.to_map(card)
 
-      assert map["card_id"] == 12345
+      assert map["card_id"] == 12_345
       assert map["state"] == :review
       assert map["step"] == 2
       assert map["stability"] == 10.5
@@ -70,7 +70,7 @@ defmodule ExFsrsTest do
 
       card =
         ExFsrs.new(
-          card_id: 12345,
+          card_id: 12_345,
           state: :review,
           step: 2,
           stability: 10.5,
@@ -91,7 +91,7 @@ defmodule ExFsrsTest do
       now_iso = DateTime.to_iso8601(now)
 
       map = %{
-        "card_id" => 12345,
+        "card_id" => 12_345,
         "state" => "review",
         "step" => 2,
         "stability" => 10.5,
@@ -102,7 +102,7 @@ defmodule ExFsrsTest do
 
       card = ExFsrs.from_map(map)
 
-      assert card.card_id == 12345
+      assert card.card_id == 12_345
       assert card.state == :review
       assert card.step == 2
       assert card.stability == 10.5
@@ -116,7 +116,7 @@ defmodule ExFsrsTest do
       now_iso = DateTime.to_iso8601(now)
 
       map = %{
-        card_id: 12345,
+        card_id: 12_345,
         state: "review",
         step: 2,
         stability: 10.5,
@@ -127,7 +127,7 @@ defmodule ExFsrsTest do
 
       card = ExFsrs.from_map(map)
 
-      assert card.card_id == 12345
+      assert card.card_id == 12_345
       assert card.state == :review
       assert card.step == 2
       assert card.stability == 10.5
@@ -141,7 +141,7 @@ defmodule ExFsrsTest do
       now_iso = DateTime.to_iso8601(now)
 
       map = %{
-        "card_id" => 12345,
+        "card_id" => 12_345,
         "state" => "review",
         "step" => 2,
         "stability" => 10.5,
@@ -157,7 +157,7 @@ defmodule ExFsrsTest do
 
     test "raises error on invalid due date" do
       map = %{
-        "card_id" => 12345,
+        "card_id" => 12_345,
         "state" => "review",
         "step" => 2,
         "stability" => 10.5,
@@ -176,7 +176,7 @@ defmodule ExFsrsTest do
       now_iso = DateTime.to_iso8601(now)
 
       map = %{
-        "card_id" => 12345,
+        "card_id" => 12_345,
         "state" => "review",
         "step" => 2,
         "stability" => 10.5,
@@ -242,8 +242,8 @@ defmodule ExFsrsTest do
 
       # Basic checks that the review was processed
       assert updated_card.state == :learning
-      assert updated_card.stability != nil
-      assert updated_card.difficulty != nil
+      assert is_number(updated_card.stability)
+      assert is_number(updated_card.difficulty)
       assert updated_card.last_review == now
     end
   end

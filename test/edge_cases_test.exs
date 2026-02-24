@@ -60,8 +60,8 @@ defmodule ExFsrs.EdgeCasesTest do
       {updated_card, _} = ExFsrs.Scheduler.review_card(scheduler, card, :good, now)
 
       # Values should be initialized
-      assert updated_card.stability != nil
-      assert updated_card.difficulty != nil
+      assert is_number(updated_card.stability)
+      assert is_number(updated_card.difficulty)
     end
 
     test "handles empty learning steps" do
