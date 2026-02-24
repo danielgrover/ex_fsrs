@@ -72,11 +72,18 @@ defmodule ExFsrs.ReviewLog do
   """
   def from_map(map) do
     %__MODULE__{
-      card: parse_card(map["card"] || map[:card]),
-      rating: parse_rating(map["rating"] || map[:rating]),
-      review_datetime: parse_review_datetime(map["review_datetime"] || map[:review_datetime]),
-      review_duration: map["review_duration"] || map[:review_duration]
+      card: parse_card(get_field(map, :card, "card")),
+      rating: parse_rating(get_field(map, :rating, "rating")),
+      review_datetime: parse_review_datetime(get_field(map, :review_datetime, "review_datetime")),
+      review_duration: get_field(map, :review_duration, "review_duration")
     }
+  end
+
+  defp get_field(map, atom_key, string_key) do
+    case Map.fetch(map, atom_key) do
+      {:ok, value} -> value
+      :error -> Map.get(map, string_key)
+    end
   end
 
   defp parse_review_datetime(nil), do: DateTime.utc_now()

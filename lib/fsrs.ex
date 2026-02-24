@@ -88,14 +88,22 @@ defmodule ExFsrs do
   """
   def from_map(map) do
     %__MODULE__{
-      card_id: map[:card_id] || map["card_id"],
-      state: parse_state(map[:state] || map["state"]),
-      step: map[:step] || map["step"],
-      stability: map[:stability] || map["stability"],
-      difficulty: map[:difficulty] || map["difficulty"],
-      due: parse_datetime!(map[:due] || map["due"], "due"),
-      last_review: parse_optional_datetime(map[:last_review] || map["last_review"], "last_review")
+      card_id: get_field(map, :card_id, "card_id"),
+      state: parse_state(get_field(map, :state, "state")),
+      step: get_field(map, :step, "step"),
+      stability: get_field(map, :stability, "stability"),
+      difficulty: get_field(map, :difficulty, "difficulty"),
+      due: parse_datetime!(get_field(map, :due, "due"), "due"),
+      last_review:
+        parse_optional_datetime(get_field(map, :last_review, "last_review"), "last_review")
     }
+  end
+
+  defp get_field(map, atom_key, string_key) do
+    case Map.fetch(map, atom_key) do
+      {:ok, value} -> value
+      :error -> Map.get(map, string_key)
+    end
   end
 
   defp parse_datetime!(value, field) do

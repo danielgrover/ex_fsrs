@@ -359,11 +359,8 @@ defmodule ExFsrs.Scheduler do
   Calculates the next interval in days based on stability and desired retention.
   """
   def next_interval(stability, scheduler) do
-    next_interval =
-      stability / scheduler.factor *
-        (:math.pow(scheduler.desired_retention, 1 / scheduler.decay) - 1)
-
-    next_interval
+    (stability / scheduler.factor *
+       (:math.pow(scheduler.desired_retention, 1 / scheduler.decay) - 1))
     |> round()
     |> max(1)
     |> min(scheduler.maximum_interval)

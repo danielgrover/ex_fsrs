@@ -59,7 +59,7 @@ defmodule ExFsrs.AlgorithmValidationTest do
   end
 
   # --- 2. Forgetting Curve ---
-  # Source: fsrs-rs test_power_forgetting_curve (f64 precision)
+  # Source: ts-fsrs algorithm.test.ts "forgetting_curve"
   # Inputs: s=1.0, default w[20]=0.1542, t=[0,1,2,3]
   describe "forgetting curve (fsrs-rs golden values)" do
     test "retrievability at multiple elapsed times with stability=1.0" do
@@ -73,7 +73,7 @@ defmodule ExFsrs.AlgorithmValidationTest do
 
       scheduler = ExFsrs.Scheduler.new()
 
-      # fsrs-rs test_power_forgetting_curve golden values (f64)
+      # ts-fsrs algorithm.test.ts forgetting_curve golden values
       cases = [
         {0, 1.0},
         {1, 0.9},
