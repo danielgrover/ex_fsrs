@@ -381,7 +381,7 @@ defmodule ExFsrs.Scheduler do
     max_ivl = min(round(interval_days + delta), maximum_interval)
     min_ivl = min(min_ivl, max_ivl)
 
-    fuzzed = round(:rand.uniform() * (max_ivl - min_ivl + 1) + min_ivl)
+    fuzzed = min_ivl + :rand.uniform(max_ivl - min_ivl + 1) - 1
     min(fuzzed, maximum_interval)
   end
 
