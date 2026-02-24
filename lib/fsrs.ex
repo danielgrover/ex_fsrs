@@ -170,4 +170,19 @@ defmodule ExFsrs do
     scheduler = ExFsrs.Scheduler.new()
     ExFsrs.Scheduler.review_card(scheduler, card, rating, review_datetime, review_duration)
   end
+
+  @doc """
+  Reschedules a card by replaying its review logs through a default scheduler.
+
+  ## Parameters
+    - card: ExFsrs struct to reschedule
+    - review_logs: List of review logs (order doesn't matter)
+
+  ## Returns
+    - Rescheduled ExFsrs card
+  """
+  def reschedule_card(%__MODULE__{} = card, review_logs) when is_list(review_logs) do
+    scheduler = ExFsrs.Scheduler.new()
+    ExFsrs.Scheduler.reschedule_card(scheduler, card, review_logs)
+  end
 end

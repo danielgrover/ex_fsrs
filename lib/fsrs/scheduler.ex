@@ -186,6 +186,14 @@ defmodule ExFsrs.Scheduler do
      DateTime.add(review_datetime, round(Enum.at(scheduler.learning_steps, 0, 1)), :minute)}
   end
 
+  # When step >= length for hard/good/easy, graduate to review
+  defp handle_learning_steps(card, rating, stability, review_datetime, scheduler)
+       when rating in [:hard, :good, :easy] and
+              card.step >= length(scheduler.learning_steps) do
+    days = maybe_fuzz(next_interval(stability, scheduler), scheduler)
+    {:review, nil, DateTime.add(review_datetime, days, :day)}
+  end
+
   defp handle_learning_steps(card, :hard, _stability, review_datetime, scheduler) do
     interval = hard_interval(card.step, scheduler.learning_steps)
     {:learning, card.step, DateTime.add(review_datetime, round(interval), :minute)}
@@ -295,6 +303,15 @@ defmodule ExFsrs.Scheduler do
        round(Enum.at(scheduler.relearning_steps, 0, 10)),
        :minute
      )}
+  end
+
+  # When steps are empty or step >= length, graduate to review for hard/good/easy
+  defp handle_relearning_steps(card, rating, stability, review_datetime, scheduler)
+       when rating in [:hard, :good, :easy] and
+              (scheduler.relearning_steps == [] or
+                 card.step >= length(scheduler.relearning_steps)) do
+    days = maybe_fuzz(next_interval(stability, scheduler), scheduler)
+    {:review, nil, DateTime.add(review_datetime, days, :day)}
   end
 
   defp handle_relearning_steps(card, :hard, _stability, review_datetime, scheduler) do
@@ -519,6 +536,63 @@ defmodule ExFsrs.Scheduler do
 
     max(stability * increase, @stability_min)
   end
+
+  @doc """
+  Reschedules a card by replaying its review logs through this scheduler.
+
+  Useful when switching to a scheduler with different parameters — replays
+  all reviews as if this scheduler had always been used.
+
+  ## Parameters
+    - scheduler: Scheduler struct to use for rescheduling
+    - card: ExFsrs struct to reschedule
+    - review_logs: List of review logs (maps or ReviewLog structs with :rating,
+      :review_datetime, and a card with matching :card_id). Order doesn't matter.
+
+  ## Returns
+    - Rescheduled ExFsrs card
+
+  ## Raises
+    - ArgumentError if any review log's card_id doesn't match the card's card_id
+  """
+  def reschedule_card(%__MODULE__{} = scheduler, %ExFsrs{} = card, review_logs)
+      when is_list(review_logs) do
+    card_id = card.card_id
+
+    Enum.each(review_logs, fn log ->
+      log_card_id = extract_card_id(log)
+
+      if log_card_id != card_id do
+        raise ArgumentError,
+              "ReviewLog card_id #{log_card_id} does not match Card card_id #{card_id}"
+      end
+    end)
+
+    sorted_logs =
+      Enum.sort_by(review_logs, fn log ->
+        extract_review_datetime(log)
+      end, DateTime)
+
+    rescheduled = ExFsrs.new(card_id: card_id, due: card.due)
+
+    Enum.reduce(sorted_logs, rescheduled, fn log, acc ->
+      rating = extract_rating(log)
+      review_datetime = extract_review_datetime(log)
+      {updated, _log} = review_card(scheduler, acc, rating, review_datetime)
+      updated
+    end)
+  end
+
+  defp extract_card_id(%ExFsrs.ReviewLog{card: card}), do: card.card_id
+  defp extract_card_id(%{card: %ExFsrs{card_id: id}}), do: id
+  defp extract_card_id(%{card: %{card_id: id}}), do: id
+  defp extract_card_id(%{card_id: id}), do: id
+
+  defp extract_rating(%ExFsrs.ReviewLog{rating: rating}), do: rating
+  defp extract_rating(%{rating: rating}), do: rating
+
+  defp extract_review_datetime(%ExFsrs.ReviewLog{review_datetime: dt}), do: dt
+  defp extract_review_datetime(%{review_datetime: dt}), do: dt
 
   def rating_to_number(rating) do
     case rating do
