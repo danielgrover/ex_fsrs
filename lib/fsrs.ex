@@ -87,51 +87,30 @@ defmodule ExFsrs do
     - ExFsrs struct
   """
   def from_map(map) do
-    due_date = map[:due] || map["due"]
-
-    due =
-      case DateTime.from_iso8601(due_date) do
-        {:ok, datetime, 0} ->
-          datetime
-
-        _ ->
-          raise "Invalid ISO8601 datetime format for due date: #{inspect(due_date)}"
-      end
-
-    last_review = map[:last_review] || map["last_review"]
-
-    last_review =
-      if last_review do
-        case DateTime.from_iso8601(last_review) do
-          {:ok, datetime, 0} ->
-            datetime
-
-          _ ->
-            raise "Invalid ISO8601 datetime format for last_review: #{inspect(last_review)}"
-        end
-      else
-        nil
-      end
-
-    state_value = map[:state] || map["state"]
-
-    state =
-      case state_value do
-        state when is_atom(state) -> state
-        state when is_binary(state) -> String.to_existing_atom(state)
-        _ -> :learning
-      end
-
     %__MODULE__{
       card_id: map[:card_id] || map["card_id"],
-      state: state,
+      state: parse_state(map[:state] || map["state"]),
       step: map[:step] || map["step"],
       stability: map[:stability] || map["stability"],
       difficulty: map[:difficulty] || map["difficulty"],
-      due: due,
-      last_review: last_review
+      due: parse_datetime!(map[:due] || map["due"], "due"),
+      last_review: parse_optional_datetime(map[:last_review] || map["last_review"], "last_review")
     }
   end
+
+  defp parse_datetime!(value, field) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, 0} -> datetime
+      _ -> raise "Invalid ISO8601 datetime format for #{field}: #{inspect(value)}"
+    end
+  end
+
+  defp parse_optional_datetime(nil, _field), do: nil
+  defp parse_optional_datetime(value, field), do: parse_datetime!(value, field)
+
+  defp parse_state(state) when is_atom(state), do: state
+  defp parse_state(state) when is_binary(state), do: String.to_existing_atom(state)
+  defp parse_state(_), do: :learning
 
   @doc """
   Calculates the retrievability of a card at a given time.
