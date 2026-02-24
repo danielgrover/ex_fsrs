@@ -116,12 +116,19 @@ defmodule ExFsrs.AlgorithmValidationTest do
   end
 
   # --- 4. next_interval Across Retention Rates ---
-  # Source: ts-fsrs algorithm.test.ts "next_interval" with stability=1.0
-  # Also fsrs-rs test_next_interval (f32 values; we use f64 like ts-fsrs)
-  describe "next_interval across retention rates (ts-fsrs golden values)" do
+  # Source: fsrs-rs test_next_interval (primary), ts-fsrs algorithm.test.ts (secondary)
+  # fsrs-rs values at retention 0.1-0.4 use f32 rounding; ts-fsrs agrees at 0.5+
+  describe "next_interval across retention rates (fsrs-rs/ts-fsrs golden values)" do
     test "stability=1.0 with varying desired_retention" do
-      # Golden values from ts-fsrs algorithm.test.ts
+      # Golden values from fsrs-rs test_next_interval and ts-fsrs algorithm.test.ts
+      # fsrs-rs: [3116766, 34793, 2508, 387, 90, 27, 9, 3, 1, 1]
+      # ts-fsrs: [3116769, 34793, 2508, 387, 90, 27, 9, 3, 1, 1]
+      # Difference at 0.1 is f32 vs f64 precision; we use f64 like ts-fsrs
       expected = [
+        {0.1, 3_116_769},
+        {0.2, 34_793},
+        {0.3, 2_508},
+        {0.4, 387},
         {0.5, 90},
         {0.6, 27},
         {0.7, 9},
@@ -147,6 +154,13 @@ defmodule ExFsrs.AlgorithmValidationTest do
     test "stability=10.0 at default retention 0.9 returns 10" do
       scheduler = ExFsrs.Scheduler.new()
       assert ExFsrs.Scheduler.next_interval(10.0, scheduler) == 10
+    end
+
+    # Source: fsrs-rs test_next_interval, max_limit case
+    test "next_interval respects maximum_interval cap" do
+      scheduler = ExFsrs.Scheduler.new(maximum_interval: 365)
+      # stability=737.47 should produce interval >> 365, but capped
+      assert ExFsrs.Scheduler.next_interval(737.47, scheduler) == 365
     end
   end
 
@@ -406,6 +420,146 @@ defmodule ExFsrs.AlgorithmValidationTest do
     test "exactly 21 parameters succeeds" do
       scheduler = ExFsrs.Scheduler.new(parameters: List.duplicate(1.0, 21))
       assert length(scheduler.parameters) == 21
+    end
+  end
+
+  # --- 11. Short-Term Stability ---
+  # Source: ts-fsrs algorithm.test.ts "next_short_term_stability"
+  # Inputs: s=5 for all ratings, default parameters
+  # Expected: [1.596818, 5, 5, 8.12960956]
+  # fsrs-rs applies max(sinc, 1.0) for rating >= 2 (Hard, Good, Easy)
+  # Only Again (rating=1) can decrease stability in short-term reviews
+  describe "short-term stability (ts-fsrs golden values)" do
+    setup do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
+
+      # Card in review state, reviewed same day (elapsed < 1 day → short-term path)
+      card =
+        ExFsrs.new(
+          state: :review,
+          stability: 5.0,
+          difficulty: 5.0,
+          last_review: @start_datetime
+        )
+
+      {:ok, scheduler: scheduler, card: card, now: @start_datetime}
+    end
+
+    test "again decreases stability", ctx do
+      {card, _} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :again, ctx.now)
+      assert_in_delta card.stability, 1.596818, 0.01
+    end
+
+    test "hard preserves stability via clamp", ctx do
+      {card, _} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :hard, ctx.now)
+      assert_in_delta card.stability, 5.0, 0.01
+    end
+
+    test "good preserves stability via clamp", ctx do
+      {card, _} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :good, ctx.now)
+      assert_in_delta card.stability, 5.0, 0.01
+    end
+
+    test "easy increases stability", ctx do
+      {card, _} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :easy, ctx.now)
+      assert_in_delta card.stability, 8.12960956, 0.01
+    end
+  end
+
+  # --- 12. Forget Stability (Lapse) ---
+  # Source: ts-fsrs algorithm.test.ts "next_forget_stability"
+  # Inputs: s=5, d=1, r=0.9 (achieved by elapsed_days=stability=5)
+  # Expected: s_fail = 1.05253961
+  # Formula: w[11] * d^(-w[12]) * ((s+1)^w[13] - 1) * exp((1-r)*w[14])
+  #   floored by min(result, s / exp(w[17]*w[18]))
+  describe "forget stability after lapse (ts-fsrs golden values)" do
+    test "again on review card at r=0.9 produces expected forget stability" do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
+
+      card =
+        ExFsrs.new(
+          state: :review,
+          stability: 5.0,
+          difficulty: 1.0,
+          last_review: @start_datetime
+        )
+
+      # Review 5 days later → elapsed=stability → r=0.9 exactly
+      review_at = DateTime.add(@start_datetime, 5, :day)
+      {card, _} = ExFsrs.Scheduler.review_card(scheduler, card, :again, review_at)
+
+      assert_in_delta card.stability, 1.05253961, 0.01
+    end
+  end
+
+  # --- 13. Initial Difficulty per Rating ---
+  # Source: ts-fsrs algorithm.test.ts "init_difficulty" and FSRS-6.test.ts "first repeat"
+  # Formula: init_d(g) = w[4] - exp(w[5] * (g - 1)) + 1, clamped to [1.0, 10.0]
+  # With default w[4]=6.4133, w[5]=0.8334:
+  #   Again(1): 6.4133 - exp(0) + 1             = 6.4133
+  #   Hard(2):  6.4133 - exp(0.8334) + 1         = 5.11217071
+  #   Good(3):  6.4133 - exp(1.6668) + 1          = 2.11810397
+  #   Easy(4):  6.4133 - exp(2.5002) + 1 → clamped to 1.0
+  describe "initial difficulty per rating (ts-fsrs golden values)" do
+    setup do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
+      card = ExFsrs.new(state: :learning, step: 0)
+      {:ok, scheduler: scheduler, card: card, now: @start_datetime}
+    end
+
+    test "again: initial difficulty = 6.4133", ctx do
+      {card, _} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :again, ctx.now)
+      assert_in_delta card.difficulty, 6.4133, 0.001
+    end
+
+    test "hard: initial difficulty = 5.11217071", ctx do
+      {card, _} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :hard, ctx.now)
+      assert_in_delta card.difficulty, 5.11217071, 0.001
+    end
+
+    test "good: initial difficulty = 2.11810397", ctx do
+      {card, _} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :good, ctx.now)
+      assert_in_delta card.difficulty, 2.11810397, 0.001
+    end
+
+    test "easy: initial difficulty clamped to 1.0", ctx do
+      {card, _} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :easy, ctx.now)
+      assert card.difficulty == 1.0
+    end
+  end
+
+  # --- 13. Forgetting Curve Extended Precision ---
+  # Source: fsrs-rs test_power_forgetting_curve (f64 precision)
+  # Inputs: s=1.0, default w[20]=0.1542, t=[0,1,2,3]
+  describe "forgetting curve extended precision (fsrs-rs golden values)" do
+    test "retrievability at f64 precision with stability=1.0" do
+      card =
+        ExFsrs.new(
+          state: :review,
+          stability: 1.0,
+          difficulty: 5.0,
+          last_review: @start_datetime
+        )
+
+      scheduler = ExFsrs.Scheduler.new()
+
+      # fsrs-rs test_power_forgetting_curve golden values (f64)
+      cases = [
+        {0, 1.0},
+        {1, 0.9},
+        {2, 0.8458846447796301},
+        {3, 0.8093881028681906}
+      ]
+
+      for {elapsed_days, expected_r} <- cases do
+        review_at = DateTime.add(@start_datetime, elapsed_days, :day)
+        r = ExFsrs.Scheduler.get_retrievability(card, review_at, scheduler)
+
+        assert_in_delta r,
+                        expected_r,
+                        0.0001,
+                        "R at elapsed=#{elapsed_days}: expected #{expected_r}, got #{r}"
+      end
     end
   end
 end

@@ -525,7 +525,7 @@ defmodule ExFsrs.Scheduler do
         :math.pow(stability, -w19)
 
     increase =
-      if rating in [:good, :easy] do
+      if rating in [:hard, :good, :easy] do
         max(increase, 1.0)
       else
         increase
