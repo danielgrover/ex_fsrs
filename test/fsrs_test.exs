@@ -210,9 +210,9 @@ defmodule ExFsrsTest do
 
       retrievability = ExFsrs.get_retrievability(card, now)
 
-      # With stability 10.0 and 1 day passed, retrievability should be around 0.9
-      assert retrievability > 0.89
-      assert retrievability < 0.91
+      # With FSRS-6 decay=-0.1542, stability 10.0 and 1 day passed, retrievability ≈ 0.9857
+      assert retrievability > 0.98
+      assert retrievability < 0.99
     end
 
     test "calculates retrievability correctly for older reviews" do
@@ -227,9 +227,9 @@ defmodule ExFsrsTest do
 
       retrievability = ExFsrs.get_retrievability(card, now)
 
-      # With stability 10.0 and 10 days passed, retrievability should be around 0.5
-      assert retrievability > 0.49
-      assert retrievability < 0.51
+      # With FSRS-6 decay=-0.1542, stability 10.0 and 10 days passed, retrievability = 0.9
+      assert retrievability > 0.89
+      assert retrievability < 0.91
     end
   end
 

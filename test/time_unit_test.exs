@@ -36,13 +36,12 @@ defmodule ExFsrs.TimeUnitTest do
       assert minutes_diff == 10
     end
 
-    test "next_interval returns interval in minutes" do
+    test "next_interval returns interval in days" do
       scheduler = ExFsrs.Scheduler.new()
 
       # Test with stability of 1.0, which should return 1 day
-      interval_minutes = ExFsrs.Scheduler.next_interval(1.0, scheduler)
-      # 1 day in minutes
-      assert interval_minutes == 24 * 60
+      interval_days = ExFsrs.Scheduler.next_interval(1.0, scheduler)
+      assert interval_days == 1
     end
   end
 

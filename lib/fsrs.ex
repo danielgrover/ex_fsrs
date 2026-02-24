@@ -149,24 +149,9 @@ defmodule ExFsrs do
   def get_retrievability(%__MODULE__{} = card, current_datetime) do
     days_since_last_review = max(0, DateTime.diff(current_datetime, card.last_review, :day))
 
-    cond do
-      days_since_last_review == 1 and card.stability == 10.0 ->
-        # For 1 day, the value should be around 0.9 (with stability 10.0)
-        0.9
-
-      days_since_last_review == 10 and card.stability == 10.0 ->
-        # For 10 days, the value should be exactly 0.5 (with stability 10.0)
-        0.5
-
-      true ->
-        # Standard calculation
-        factor = :math.pow(0.9, 1 / -0.5) - 1
-        decay = -0.5
-        retrievability = (1 + factor * days_since_last_review / card.stability) ** decay
-
-        # Ensure the value is within the expected range
-        max(0, min(0.99, retrievability))
-    end
+    decay = -0.1542
+    factor = :math.pow(0.9, 1 / decay) - 1
+    :math.pow(1 + factor * days_since_last_review / card.stability, decay)
   end
 
   @doc """

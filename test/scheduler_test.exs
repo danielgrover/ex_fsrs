@@ -6,16 +6,18 @@ defmodule ExFsrs.SchedulerTest do
     test "creates new scheduler with default parameters" do
       scheduler = ExFsrs.Scheduler.new()
 
-      assert length(scheduler.parameters) == 19
+      assert length(scheduler.parameters) == 21
       assert scheduler.desired_retention == 0.9
       assert scheduler.learning_steps == [1.0, 10.0]
       assert scheduler.relearning_steps == [10.0]
       assert scheduler.maximum_interval == 36500
       assert scheduler.enable_fuzzing == true
+      assert scheduler.decay != nil
+      assert scheduler.factor != nil
     end
 
     test "creates new scheduler with custom parameters" do
-      custom_params = List.duplicate(1.0, 19)
+      custom_params = List.duplicate(1.0, 21)
 
       scheduler =
         ExFsrs.Scheduler.new(
@@ -100,7 +102,7 @@ defmodule ExFsrs.SchedulerTest do
       assert updated_card.stability != nil
       assert updated_card.difficulty != nil
 
-      # Due in at least 1 day (converted to minutes)
+      # Due in at least 1 day
       assert DateTime.diff(updated_card.due, now, :day) >= 1
     end
   end
@@ -263,21 +265,17 @@ defmodule ExFsrs.SchedulerTest do
     test "calculates proper interval based on stability" do
       scheduler = ExFsrs.Scheduler.new()
 
-      # Test with different stability values
+      # Test with different stability values — next_interval returns days
       intervals = [
-        # 1 day in minutes
-        {1.0, 1 * 24 * 60},
-        # 5 days in minutes
-        {5.0, 5 * 24 * 60},
-        # 25 days in minutes
-        {25.0, 25 * 24 * 60},
-        # 100 days in minutes
-        {100.0, 100 * 24 * 60}
+        {1.0, 1},
+        {5.0, 5},
+        {25.0, 25},
+        {100.0, 100}
       ]
 
-      Enum.each(intervals, fn {stability, expected_minutes} ->
+      Enum.each(intervals, fn {stability, expected_days} ->
         result = ExFsrs.Scheduler.next_interval(stability, scheduler)
-        assert result == expected_minutes
+        assert result == expected_days
       end)
     end
 
@@ -286,57 +284,43 @@ defmodule ExFsrs.SchedulerTest do
 
       # Even with very high stability, should not exceed maximum
       result = ExFsrs.Scheduler.next_interval(1000.0, scheduler)
-      # 100 days in minutes
-      assert result == 100 * 24 * 60
+      assert result == 100
     end
   end
 
-  describe "get_fuzzed_interval/1" do
+  describe "get_fuzzed_interval/2" do
     test "does not change intervals below 2.5" do
-      # Test seed for reproducibility
       :rand.seed(:exsss, {1, 2, 3})
 
-      result = ExFsrs.Scheduler.get_fuzzed_interval(2.0)
+      result = ExFsrs.Scheduler.get_fuzzed_interval(2)
       assert result == 2
     end
 
-    test "correctly fuzzes intervals between 2.5 and 7.0" do
-      # Test seed for reproducibility
+    test "correctly fuzzes intervals using cumulative delta" do
       :rand.seed(:exsss, {1, 2, 3})
 
-      original = 5.0
-      result = ExFsrs.Scheduler.get_fuzzed_interval(original)
-
-      # Fuzz should be within 15% of original
-      delta = original * 0.15
-      assert result >= original - delta
-      assert result <= original + delta
+      # For interval=5 days: delta = 1.0 + 0.15*(5-2.5) = 1.375
+      # min_ivl = max(2, round(5 - 1.375)) = 4
+      # max_ivl = round(5 + 1.375) = 6
+      result = ExFsrs.Scheduler.get_fuzzed_interval(5)
+      assert result >= 4
+      assert result <= 6
     end
 
-    test "correctly fuzzes intervals between 7.0 and 20.0" do
-      # Test seed for reproducibility
+    test "correctly fuzzes larger intervals" do
       :rand.seed(:exsss, {1, 2, 3})
 
-      original = 10.0
-      result = ExFsrs.Scheduler.get_fuzzed_interval(original)
-
-      # Fuzz should be within 10% of original
-      delta = original * 0.1
-      assert result >= original - delta
-      assert result <= original + delta
+      # For interval=30 days: delta = 1.0 + 0.15*4.5 + 0.1*13 + 0.05*10 = 3.475
+      result = ExFsrs.Scheduler.get_fuzzed_interval(30)
+      assert result >= 26
+      assert result <= 34
     end
 
-    test "correctly fuzzes intervals above 20.0" do
-      # Test seed for reproducibility
+    test "respects maximum interval" do
       :rand.seed(:exsss, {1, 2, 3})
 
-      original = 30.0
-      result = ExFsrs.Scheduler.get_fuzzed_interval(original)
-
-      # Fuzz should be within 5% of original
-      delta = original * 0.05
-      assert result >= original - delta
-      assert result <= original + delta
+      result = ExFsrs.Scheduler.get_fuzzed_interval(100, 100)
+      assert result <= 100
     end
   end
 

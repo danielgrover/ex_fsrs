@@ -1,6 +1,6 @@
 defmodule ExFsrs.Scheduler do
   @moduledoc """
-  FSRS Scheduler implementation in Elixir.
+  FSRS-6 Scheduler implementation in Elixir.
   Handles the core spaced repetition algorithm.
   """
 
@@ -11,45 +11,35 @@ defmodule ExFsrs.Scheduler do
   # 10 minutes
   @relearning_steps [10.0]
   @maximum_interval 36500
+  @stability_min 0.001
   @default_parameters [
-    # initial stability for again
-    0.40255,
-    # initial stability for hard
-    1.18385,
-    # initial stability for good
-    3.173,
-    # initial stability for easy
-    15.69105,
-    # initial difficulty
-    7.1949,
-    # difficulty decay
-    0.5345,
-    # difficulty factor
-    1.4604,
-    # mean reversion
-    0.0046,
-    # stability decay
-    1.54575,
-    # stability factor
-    0.1192,
-    # stability growth
-    1.01925,
-    # forget stability
-    1.9395,
-    # forget difficulty
-    0.11,
-    # forget growth
-    0.29605,
-    # forget penalty
-    2.2698,
-    # hard penalty
-    0.2315,
-    # easy bonus
-    2.9898,
-    # short term stability
-    0.51655,
-    # short term decay
-    0.6621
+    0.212,
+    1.2931,
+    2.3065,
+    8.2956,
+    6.4133,
+    0.8334,
+    3.0194,
+    0.001,
+    1.8722,
+    0.1666,
+    0.796,
+    1.4835,
+    0.0614,
+    0.2629,
+    1.6483,
+    0.6014,
+    1.8729,
+    0.5425,
+    0.0912,
+    0.0658,
+    0.1542
+  ]
+
+  @fuzz_ranges [
+    %{start: 2.5, end: 7.0, factor: 0.15},
+    %{start: 7.0, end: 20.0, factor: 0.1},
+    %{start: 20.0, end: :infinity, factor: 0.05}
   ]
 
   @type t :: %__MODULE__{
@@ -59,7 +49,9 @@ defmodule ExFsrs.Scheduler do
           relearning_steps: [float()],
           maximum_interval: integer(),
           enable_fuzzing: boolean(),
-          default_parameters: [float()]
+          default_parameters: [float()],
+          decay: float(),
+          factor: float()
         }
 
   defstruct parameters: @default_parameters,
@@ -68,20 +60,19 @@ defmodule ExFsrs.Scheduler do
             relearning_steps: @relearning_steps,
             maximum_interval: @maximum_interval,
             enable_fuzzing: true,
-            default_parameters: @default_parameters
-
-  @decay -0.5
-  @factor :math.pow(0.9, 1 / @decay) - 1
+            default_parameters: @default_parameters,
+            decay: nil,
+            factor: nil
 
   @doc """
   Creates a new scheduler with default parameters.
 
   ## Parameters
     - opts: Keyword list of options
-      - parameters: List of 19 model weights
+      - parameters: List of 21 model weights
       - desired_retention: Target retention rate (default: 0.9)
-      - learning_steps: List of time intervals for learning state
-      - relearning_steps: List of time intervals for relearning state
+      - learning_steps: List of time intervals for learning state (in minutes)
+      - relearning_steps: List of time intervals for relearning state (in minutes)
       - maximum_interval: Maximum days for future scheduling
       - enable_fuzzing: Whether to apply random intervals
 
@@ -96,6 +87,9 @@ defmodule ExFsrs.Scheduler do
     maximum_interval = Keyword.get(opts, :maximum_interval, @maximum_interval)
     enable_fuzzing = Keyword.get(opts, :enable_fuzzing, true)
 
+    decay = -Enum.at(parameters, 20)
+    factor = :math.pow(0.9, 1 / decay) - 1
+
     %__MODULE__{
       parameters: parameters,
       desired_retention: desired_retention,
@@ -103,7 +97,9 @@ defmodule ExFsrs.Scheduler do
       relearning_steps: relearning_steps,
       maximum_interval: maximum_interval,
       enable_fuzzing: enable_fuzzing,
-      default_parameters: parameters
+      default_parameters: parameters,
+      decay: decay,
+      factor: factor
     }
   end
 
@@ -159,7 +155,7 @@ defmodule ExFsrs.Scheduler do
       # If they are empty, always move the card to review state
       stability = initial_stability(rating, scheduler)
       difficulty = initial_difficulty(rating, scheduler)
-      next_interval = next_interval(stability, scheduler)
+      days = next_interval(stability, scheduler)
 
       %{
         card
@@ -167,7 +163,7 @@ defmodule ExFsrs.Scheduler do
           step: nil,
           stability: stability,
           difficulty: difficulty,
-          due: DateTime.add(review_datetime, round(next_interval), :minute),
+          due: DateTime.add(review_datetime, days, :day),
           last_review: review_datetime
       }
     else
@@ -184,20 +180,21 @@ defmodule ExFsrs.Scheduler do
             {next_stability(
                card.difficulty,
                card.stability,
-               get_retrievability(card, review_datetime),
+               get_retrievability(card, review_datetime, scheduler),
                rating,
                scheduler
              ), next_difficulty(card.difficulty, rating, scheduler)}
         end
 
-      {next_state, next_step, next_interval} =
+      {next_state, next_step, next_due} =
         case rating do
           :again ->
-            if card.step + 1 == length(scheduler.learning_steps) do
-              {:review, nil, next_interval(stability, scheduler)}
-            else
-              {:learning, 0, Enum.at(scheduler.learning_steps, 0, 1)}
-            end
+            {:learning, 0,
+             DateTime.add(
+               review_datetime,
+               round(Enum.at(scheduler.learning_steps, 0, 1)),
+               :minute
+             )}
 
           :hard ->
             interval =
@@ -213,24 +210,40 @@ defmodule ExFsrs.Scheduler do
                   Enum.at(scheduler.learning_steps, card.step, 10)
               end
 
-            {:learning, card.step, interval}
+            {:learning, card.step, DateTime.add(review_datetime, round(interval), :minute)}
 
           :good ->
             if card.step + 1 == length(scheduler.learning_steps) do
-              {:review, nil, next_interval(stability, scheduler)}
+              days = next_interval(stability, scheduler)
+
+              days =
+                if scheduler.enable_fuzzing do
+                  get_fuzzed_interval(days, scheduler.maximum_interval)
+                else
+                  days
+                end
+
+              {:review, nil, DateTime.add(review_datetime, days, :day)}
             else
-              {:learning, card.step + 1, Enum.at(scheduler.learning_steps, card.step + 1, 10)}
+              {:learning, card.step + 1,
+               DateTime.add(
+                 review_datetime,
+                 round(Enum.at(scheduler.learning_steps, card.step + 1, 10)),
+                 :minute
+               )}
             end
 
           :easy ->
-            {:review, nil, next_interval(stability, scheduler)}
-        end
+            days = next_interval(stability, scheduler)
 
-      next_interval =
-        if scheduler.enable_fuzzing and next_state == :review do
-          get_fuzzed_interval(next_interval)
-        else
-          next_interval
+            days =
+              if scheduler.enable_fuzzing do
+                get_fuzzed_interval(days, scheduler.maximum_interval)
+              else
+                days
+              end
+
+            {:review, nil, DateTime.add(review_datetime, days, :day)}
         end
 
       %{
@@ -239,7 +252,7 @@ defmodule ExFsrs.Scheduler do
           step: next_step,
           stability: stability,
           difficulty: difficulty,
-          due: DateTime.add(review_datetime, round(next_interval), :minute),
+          due: next_due,
           last_review: review_datetime
       }
     end
@@ -256,30 +269,42 @@ defmodule ExFsrs.Scheduler do
           {next_stability(
              card.difficulty,
              card.stability,
-             get_retrievability(card, review_datetime),
+             get_retrievability(card, review_datetime, scheduler),
              rating,
              scheduler
            ), next_difficulty(card.difficulty, rating, scheduler)}
       end
 
-    {next_state, next_step, next_interval} =
+    {next_state, next_step, next_due} =
       case rating do
         :again ->
           if length(scheduler.relearning_steps) == 0 do
-            {:review, nil, next_interval(stability, scheduler)}
+            days = next_interval(stability, scheduler)
+
+            days =
+              if scheduler.enable_fuzzing do
+                get_fuzzed_interval(days, scheduler.maximum_interval)
+              else
+                days
+              end
+
+            {:review, nil, DateTime.add(review_datetime, days, :day)}
           else
-            {:relearning, 0, Enum.at(scheduler.relearning_steps, 0)}
+            {:relearning, 0,
+             DateTime.add(review_datetime, round(Enum.at(scheduler.relearning_steps, 0)), :minute)}
           end
 
         _ ->
-          {:review, nil, next_interval(stability, scheduler)}
-      end
+          days = next_interval(stability, scheduler)
 
-    next_interval =
-      if scheduler.enable_fuzzing and next_state == :review do
-        get_fuzzed_interval(next_interval)
-      else
-        next_interval
+          days =
+            if scheduler.enable_fuzzing do
+              get_fuzzed_interval(days, scheduler.maximum_interval)
+            else
+              days
+            end
+
+          {:review, nil, DateTime.add(review_datetime, days, :day)}
       end
 
     %{
@@ -288,7 +313,7 @@ defmodule ExFsrs.Scheduler do
         step: next_step,
         stability: stability,
         difficulty: difficulty,
-        due: DateTime.add(review_datetime, round(next_interval), :minute),
+        due: next_due,
         last_review: review_datetime
     }
   end
@@ -304,16 +329,21 @@ defmodule ExFsrs.Scheduler do
           {next_stability(
              card.difficulty,
              card.stability,
-             get_retrievability(card, review_datetime),
+             get_retrievability(card, review_datetime, scheduler),
              rating,
              scheduler
            ), next_difficulty(card.difficulty, rating, scheduler)}
       end
 
-    {next_state, next_step, next_interval} =
+    {next_state, next_step, next_due} =
       case rating do
         :again ->
-          {:relearning, 0, Enum.at(scheduler.relearning_steps, 0, 10)}
+          {:relearning, 0,
+           DateTime.add(
+             review_datetime,
+             round(Enum.at(scheduler.relearning_steps, 0, 10)),
+             :minute
+           )}
 
         :hard ->
           interval =
@@ -329,26 +359,40 @@ defmodule ExFsrs.Scheduler do
                 Enum.at(scheduler.relearning_steps, card.step, 10)
             end
 
-          {:relearning, card.step, interval}
+          {:relearning, card.step, DateTime.add(review_datetime, round(interval), :minute)}
 
         :good ->
           if card.step + 1 == length(scheduler.relearning_steps) do
-            # Correctly handle transition from relearning to review state
-            next_days =
-              prepare_interval_for_fuzzing(
-                next_interval(stability, scheduler),
-                :review,
-                :relearning
-              )
+            days = next_interval(stability, scheduler)
 
-            # Convert days to minutes
-            {:review, nil, next_days * 24 * 60}
+            days =
+              if scheduler.enable_fuzzing do
+                get_fuzzed_interval(days, scheduler.maximum_interval)
+              else
+                days
+              end
+
+            {:review, nil, DateTime.add(review_datetime, days, :day)}
           else
-            {:relearning, card.step + 1, Enum.at(scheduler.relearning_steps, card.step + 1, 10)}
+            {:relearning, card.step + 1,
+             DateTime.add(
+               review_datetime,
+               round(Enum.at(scheduler.relearning_steps, card.step + 1, 10)),
+               :minute
+             )}
           end
 
         :easy ->
-          {:review, nil, next_interval(stability, scheduler)}
+          days = next_interval(stability, scheduler)
+
+          days =
+            if scheduler.enable_fuzzing do
+              get_fuzzed_interval(days, scheduler.maximum_interval)
+            else
+              days
+            end
+
+          {:review, nil, DateTime.add(review_datetime, days, :day)}
       end
 
     %{
@@ -357,168 +401,163 @@ defmodule ExFsrs.Scheduler do
         step: next_step,
         stability: stability,
         difficulty: difficulty,
-        due: DateTime.add(review_datetime, round(next_interval), :minute),
+        due: next_due,
         last_review: review_datetime
     }
   end
 
+  @doc """
+  Calculates the next interval in days based on stability and desired retention.
+  """
   def next_interval(stability, scheduler) do
-    factor = :math.pow(0.9, 1 / @decay) - 1
-    next_interval = stability / factor * (:math.pow(scheduler.desired_retention, 1 / @decay) - 1)
-    # intervals are full days
+    next_interval =
+      stability / scheduler.factor *
+        (:math.pow(scheduler.desired_retention, 1 / scheduler.decay) - 1)
+
     next_interval = round(next_interval)
-    # must be at least 1 day long
     next_interval = max(next_interval, 1)
-    # can not be longer than the maximum interval
-    next_interval = min(next_interval, scheduler.maximum_interval)
-    # convert days to minutes
-    next_interval * 24 * 60
+    min(next_interval, scheduler.maximum_interval)
   end
 
-  def get_fuzzed_interval(interval) do
-    cond do
-      interval < 2.5 ->
-        interval
+  @doc """
+  Applies fuzzing to an interval (in days) using the FSRS-6 cumulative delta algorithm.
+  """
+  def get_fuzzed_interval(interval_days, maximum_interval \\ @maximum_interval) do
+    if interval_days < 2.5 do
+      round(interval_days)
+    else
+      delta =
+        Enum.reduce(@fuzz_ranges, 1.0, fn fuzz_range, acc ->
+          range_contribution =
+            if fuzz_range.end == :infinity do
+              if interval_days > fuzz_range.start do
+                fuzz_range.factor * (interval_days - fuzz_range.start)
+              else
+                0.0
+              end
+            else
+              fuzz_range.factor * max(min(interval_days, fuzz_range.end) - fuzz_range.start, 0.0)
+            end
 
-      interval < 7.0 ->
-        min_ivl = max(2, interval - round(interval * 0.15))
-        max_ivl = min(interval + round(interval * 0.15), 36500)
-        min_ivl + :rand.uniform() * (max_ivl - min_ivl)
+          acc + range_contribution
+        end)
 
-      interval < 20.0 ->
-        min_ivl = max(2, interval - round(interval * 0.1))
-        max_ivl = min(interval + round(interval * 0.1), 36500)
-        min_ivl + :rand.uniform() * (max_ivl - min_ivl)
+      min_ivl = round(interval_days - delta)
+      max_ivl = round(interval_days + delta)
+      min_ivl = max(2, min_ivl)
+      max_ivl = min(max_ivl, maximum_interval)
+      min_ivl = min(min_ivl, max_ivl)
 
-      true ->
-        min_ivl = max(2, interval - round(interval * 0.05))
-        max_ivl = min(interval + round(interval * 0.05), 36500)
-        min_ivl + :rand.uniform() * (max_ivl - min_ivl)
+      fuzzed = round(:rand.uniform() * (max_ivl - min_ivl + 1) + min_ivl)
+      min(fuzzed, maximum_interval)
     end
-    |> round()
   end
 
-  defp initial_stability(rating, _scheduler) do
-    case rating do
-      :again -> 0.40255
-      :hard -> 1.18385
-      :good -> 3.173
-      :easy -> 15.69105
-    end
+  defp initial_stability(rating, scheduler) do
+    max(Enum.at(scheduler.parameters, rating_to_number(rating) - 1), @stability_min)
   end
 
-  defp initial_difficulty(rating, _scheduler) do
-    case rating do
-      :again -> 7.1949
-      :hard -> 6.488305268471453
-      :good -> 5.282434422319005
-      :easy -> 3.2245015893713678
-    end
+  defp initial_difficulty(rating, scheduler) do
+    w4 = Enum.at(scheduler.parameters, 4)
+    w5 = Enum.at(scheduler.parameters, 5)
+    difficulty = w4 - :math.exp(w5 * (rating_to_number(rating) - 1)) + 1
+    min(max(difficulty, 1.0), 10.0)
+  end
+
+  defp initial_difficulty_unclamped(rating, scheduler) do
+    w4 = Enum.at(scheduler.parameters, 4)
+    w5 = Enum.at(scheduler.parameters, 5)
+    w4 - :math.exp(w5 * (rating_to_number(rating) - 1)) + 1
   end
 
   def next_stability(difficulty, stability, retrievability, rating, scheduler) do
-    case rating do
-      :again -> next_forget_stability(difficulty, stability, retrievability, scheduler)
-      _ -> next_recall_stability(difficulty, stability, retrievability, rating, scheduler)
-    end
+    result =
+      case rating do
+        :again -> next_forget_stability(difficulty, stability, retrievability, scheduler)
+        _ -> next_recall_stability(difficulty, stability, retrievability, rating, scheduler)
+      end
+
+    max(result, @stability_min)
   end
 
   defp next_forget_stability(difficulty, stability, retrievability, scheduler) do
-    # 1.9395
     parametr11 = Enum.at(scheduler.parameters, 11)
-    # 0.11
     parametr12 = Enum.at(scheduler.parameters, 12)
-    # 0.29605
     parametr13 = Enum.at(scheduler.parameters, 13)
-    # 2.2698
     parametr14 = Enum.at(scheduler.parameters, 14)
-    # 0.51655
     parametr17 = Enum.at(scheduler.parameters, 17)
-    # 0.6621
     parametr18 = Enum.at(scheduler.parameters, 18)
 
-    # Long term calculation
-    # 1.9395
-    # difficulty ** -0.11
-    # ((stability + 1) ** 0.29605) - 1
-    # e ** ((1 - retrievability) * 2.2698)
     long_term =
       parametr11 *
         :math.pow(difficulty, -parametr12) *
         (:math.pow(stability + 1, parametr13) - 1) *
         :math.exp((1 - retrievability) * parametr14)
 
-    # Short term calculation
     short_term = stability / :math.exp(parametr17 * parametr18)
 
-    # Final result
     min(long_term, short_term)
   end
 
   defp next_recall_stability(difficulty, stability, retrievability, rating, scheduler) do
-    # 1.54575
     parametr8 = Enum.at(scheduler.parameters, 8)
-    # 0.1192
     parametr9 = Enum.at(scheduler.parameters, 9)
-    # 1.01925
     parametr10 = Enum.at(scheduler.parameters, 10)
-    # 0.2315
     parametr15 = Enum.at(scheduler.parameters, 15)
-    # 2.9898
     parametr16 = Enum.at(scheduler.parameters, 16)
 
     hard_penalty = if rating == :hard, do: parametr15, else: 1.0
     easy_bonus = if rating == :easy, do: parametr16, else: 1.0
 
-    # e ** parameters[8]
-    # stability ** -parameters[9]
-    # (e ** ((1 - retrievability) * parameters[10])) - 1
-    result =
-      stability *
-        (1 +
-           :math.exp(parametr8) *
-             (11 - difficulty) *
-             :math.pow(stability, -parametr9) *
-             (:math.exp((1 - retrievability) * parametr10) - 1) *
-             hard_penalty *
-             easy_bonus)
-
-    result
+    stability *
+      (1 +
+         :math.exp(parametr8) *
+           (11 - difficulty) *
+           :math.pow(stability, -parametr9) *
+           (:math.exp((1 - retrievability) * parametr10) - 1) *
+           hard_penalty *
+           easy_bonus)
   end
 
   defp next_difficulty(difficulty, rating, scheduler) do
     difficulty = difficulty || 1.0
 
-    # Linear damping function
     linear_damping = fn delta_difficulty, diff ->
       (10.0 - diff) * delta_difficulty / 9.0
     end
 
-    # Mean reversion function
-    # 0.0046
     parametr7 = Enum.at(scheduler.parameters, 7)
 
     mean_reversion = fn arg1, arg2 ->
       parametr7 * arg1 + (1 - parametr7) * arg2
     end
 
-    arg1 = initial_difficulty(:easy, scheduler)
-    # 1.4604
+    arg1 = initial_difficulty_unclamped(:easy, scheduler)
     parametr6 = Enum.at(scheduler.parameters, 6)
     delta_difficulty = -(parametr6 * (rating_to_number(rating) - 3))
     arg2 = difficulty + linear_damping.(delta_difficulty, difficulty)
     next_difficulty = mean_reversion.(arg1, arg2)
 
-    # Bound next_difficulty between 1 and 10
     min(max(next_difficulty, 1.0), 10.0)
   end
 
   defp short_term_stability(stability, rating, scheduler) do
-    # 0.51655
     parametr17 = Enum.at(scheduler.parameters, 17)
-    # 0.6621
     parametr18 = Enum.at(scheduler.parameters, 18)
-    stability * :math.exp(parametr17 * (rating_to_number(rating) - 3 + parametr18))
+    parametr19 = Enum.at(scheduler.parameters, 19)
+
+    increase =
+      :math.exp(parametr17 * (rating_to_number(rating) - 3 + parametr18)) *
+        :math.pow(stability, -parametr19)
+
+    increase =
+      if rating in [:good, :easy] do
+        max(increase, 1.0)
+      else
+        increase
+      end
+
+    max(stability * increase, @stability_min)
   end
 
   def rating_to_number(rating) do
@@ -537,22 +576,14 @@ defmodule ExFsrs.Scheduler do
     end
   end
 
-  defp get_retrievability(card, review_datetime) do
+  defp get_retrievability(card, review_datetime, scheduler) do
     case card.last_review do
       nil ->
         0
 
       last_review ->
         elapsed_days = max(0, DateTime.diff(review_datetime, last_review, :day))
-        :math.pow(1 + @factor * elapsed_days / card.stability, @decay)
-    end
-  end
-
-  defp prepare_interval_for_fuzzing(interval, next_state, current_state) do
-    if current_state == :relearning and next_state == :review do
-      interval / (24 * 60)
-    else
-      interval
+        :math.pow(1 + scheduler.factor * elapsed_days / card.stability, scheduler.decay)
     end
   end
 end

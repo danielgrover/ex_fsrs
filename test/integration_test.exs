@@ -22,7 +22,9 @@ defmodule ExFsrs.IntegrationTest do
       {card, log2} = ExFsrs.review_card(card, :good, now)
       assert card.state == :review
       assert card.step == nil
-      assert card.stability > log1.card.stability
+      # With FSRS-6, short-term stability floors increase at 1.0 for :good,
+      # so stability stays >= initial during learning phase
+      assert card.stability >= log1.card.stability
       assert log2.rating == :good
 
       # Move time forward beyond due date
@@ -106,17 +108,17 @@ defmodule ExFsrs.IntegrationTest do
       {card, _} = ExFsrs.review_card(card, :good)
       initial_stability = card.stability
 
-      # Wait until due date
-      now = DateTime.add(card.due, 1, :minute)
+      # Wait until due date (at least 1 day later to trigger long-term stability)
+      now = DateTime.add(card.due, 1, :day)
       {card, _} = ExFsrs.review_card(card, :good, now)
       second_stability = card.stability
 
       # Wait until due date again
-      now = DateTime.add(card.due, 1, :minute)
+      now = DateTime.add(card.due, 1, :day)
       {card, _} = ExFsrs.review_card(card, :good, now)
       third_stability = card.stability
 
-      # Stability should increase with each review
+      # Stability should increase with each review (long-term reviews)
       assert second_stability > initial_stability
       assert third_stability > second_stability
     end
