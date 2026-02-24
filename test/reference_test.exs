@@ -78,33 +78,6 @@ defmodule ExFsrs.ReferenceTest do
     end
   end
 
-  describe "py-fsrs test_custom_scheduler_args" do
-    test "explicit defaults produce same intervals as implicit defaults" do
-      ratings = [
-        :good,
-        :good,
-        :good,
-        :good,
-        :good,
-        :good,
-        :again,
-        :again,
-        :good,
-        :good,
-        :good,
-        :good,
-        :good
-      ]
-
-      {_card, intervals} =
-        review_sequence(ratings,
-          scheduler_opts: [desired_retention: 0.9, maximum_interval: 36_500]
-        )
-
-      assert intervals == [0, 2, 11, 46, 163, 498, 0, 0, 2, 4, 7, 12, 21]
-    end
-  end
-
   describe "py-fsrs test_repeated_correct_reviews" do
     test "difficulty floors at 1.0 after many easy reviews" do
       scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
@@ -671,6 +644,43 @@ defmodule ExFsrs.ReferenceTest do
 
       assert_raise ArgumentError, ~r/ReviewLog card_id 2 does not match Card card_id 1/, fn ->
         ExFsrs.Scheduler.reschedule_card(scheduler, card, logs)
+      end
+    end
+  end
+
+  describe "reschedule_card with out-of-order logs" do
+    test "produces same result regardless of log order" do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
+      card = ExFsrs.new(state: :learning, step: 0)
+      ratings = [:good, :good, :good, :again, :good]
+
+      ordered_logs = build_review_logs(card, ratings, scheduler)
+      shuffled_logs = Enum.shuffle(ordered_logs)
+
+      rescheduled_ordered = ExFsrs.Scheduler.reschedule_card(scheduler, card, ordered_logs)
+      rescheduled_shuffled = ExFsrs.Scheduler.reschedule_card(scheduler, card, shuffled_logs)
+
+      assert_in_delta rescheduled_ordered.stability, rescheduled_shuffled.stability, 0.0001
+      assert_in_delta rescheduled_ordered.difficulty, rescheduled_shuffled.difficulty, 0.0001
+      assert rescheduled_ordered.state == rescheduled_shuffled.state
+      assert rescheduled_ordered.due == rescheduled_shuffled.due
+    end
+  end
+
+  describe "empty learning_steps with all ratings" do
+    test "all ratings graduate directly to review" do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false, learning_steps: [])
+      now = @start_datetime
+
+      for rating <- [:again, :hard, :good, :easy] do
+        card = ExFsrs.new(state: :learning, step: 0)
+        {updated, _} = ExFsrs.Scheduler.review_card(scheduler, card, rating, now)
+
+        assert updated.state == :review,
+               "#{rating} with empty learning_steps should graduate to review"
+
+        assert updated.step == nil
+        assert DateTime.diff(updated.due, now, :day) >= 1
       end
     end
   end

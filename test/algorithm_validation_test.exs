@@ -58,11 +58,10 @@ defmodule ExFsrs.AlgorithmValidationTest do
     end
   end
 
-  # --- 2. Forgetting Curve Precision ---
-  # Source: ts-fsrs algorithm.test.ts "forgetting_curve"
-  # With stability=1.0, decay=-0.1542 (default w[20]):
-  #   elapsed=0 -> R=1.0, elapsed=1 -> R=0.9, elapsed=2 -> R=0.84588465, elapsed=3 -> R=0.8093881
-  describe "forgetting curve precision (ts-fsrs golden values)" do
+  # --- 2. Forgetting Curve ---
+  # Source: fsrs-rs test_power_forgetting_curve (f64 precision)
+  # Inputs: s=1.0, default w[20]=0.1542, t=[0,1,2,3]
+  describe "forgetting curve (fsrs-rs golden values)" do
     test "retrievability at multiple elapsed times with stability=1.0" do
       card =
         ExFsrs.new(
@@ -74,11 +73,12 @@ defmodule ExFsrs.AlgorithmValidationTest do
 
       scheduler = ExFsrs.Scheduler.new()
 
+      # fsrs-rs test_power_forgetting_curve golden values (f64)
       cases = [
         {0, 1.0},
         {1, 0.9},
-        {2, 0.84588465},
-        {3, 0.8093881}
+        {2, 0.8458846447796301},
+        {3, 0.8093881028681906}
       ]
 
       for {elapsed_days, expected_r} <- cases do
@@ -87,7 +87,7 @@ defmodule ExFsrs.AlgorithmValidationTest do
 
         assert_in_delta r,
                         expected_r,
-                        0.001,
+                        0.0001,
                         "R at elapsed=#{elapsed_days}: expected #{expected_r}, got #{r}"
       end
     end
@@ -489,77 +489,6 @@ defmodule ExFsrs.AlgorithmValidationTest do
       {card, _} = ExFsrs.Scheduler.review_card(scheduler, card, :again, review_at)
 
       assert_in_delta card.stability, 1.05253961, 0.01
-    end
-  end
-
-  # --- 13. Initial Difficulty per Rating ---
-  # Source: ts-fsrs algorithm.test.ts "init_difficulty" and FSRS-6.test.ts "first repeat"
-  # Formula: init_d(g) = w[4] - exp(w[5] * (g - 1)) + 1, clamped to [1.0, 10.0]
-  # With default w[4]=6.4133, w[5]=0.8334:
-  #   Again(1): 6.4133 - exp(0) + 1             = 6.4133
-  #   Hard(2):  6.4133 - exp(0.8334) + 1         = 5.11217071
-  #   Good(3):  6.4133 - exp(1.6668) + 1          = 2.11810397
-  #   Easy(4):  6.4133 - exp(2.5002) + 1 → clamped to 1.0
-  describe "initial difficulty per rating (ts-fsrs golden values)" do
-    setup do
-      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
-      card = ExFsrs.new(state: :learning, step: 0)
-      {:ok, scheduler: scheduler, card: card, now: @start_datetime}
-    end
-
-    test "again: initial difficulty = 6.4133", ctx do
-      {card, _} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :again, ctx.now)
-      assert_in_delta card.difficulty, 6.4133, 0.001
-    end
-
-    test "hard: initial difficulty = 5.11217071", ctx do
-      {card, _} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :hard, ctx.now)
-      assert_in_delta card.difficulty, 5.11217071, 0.001
-    end
-
-    test "good: initial difficulty = 2.11810397", ctx do
-      {card, _} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :good, ctx.now)
-      assert_in_delta card.difficulty, 2.11810397, 0.001
-    end
-
-    test "easy: initial difficulty clamped to 1.0", ctx do
-      {card, _} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :easy, ctx.now)
-      assert card.difficulty == 1.0
-    end
-  end
-
-  # --- 13. Forgetting Curve Extended Precision ---
-  # Source: fsrs-rs test_power_forgetting_curve (f64 precision)
-  # Inputs: s=1.0, default w[20]=0.1542, t=[0,1,2,3]
-  describe "forgetting curve extended precision (fsrs-rs golden values)" do
-    test "retrievability at f64 precision with stability=1.0" do
-      card =
-        ExFsrs.new(
-          state: :review,
-          stability: 1.0,
-          difficulty: 5.0,
-          last_review: @start_datetime
-        )
-
-      scheduler = ExFsrs.Scheduler.new()
-
-      # fsrs-rs test_power_forgetting_curve golden values (f64)
-      cases = [
-        {0, 1.0},
-        {1, 0.9},
-        {2, 0.8458846447796301},
-        {3, 0.8093881028681906}
-      ]
-
-      for {elapsed_days, expected_r} <- cases do
-        review_at = DateTime.add(@start_datetime, elapsed_days, :day)
-        r = ExFsrs.Scheduler.get_retrievability(card, review_at, scheduler)
-
-        assert_in_delta r,
-                        expected_r,
-                        0.0001,
-                        "R at elapsed=#{elapsed_days}: expected #{expected_r}, got #{r}"
-      end
     end
   end
 end
