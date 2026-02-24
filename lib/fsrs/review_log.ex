@@ -55,7 +55,7 @@ defmodule ExFsrs.ReviewLog do
   def to_map(%__MODULE__{} = log) do
     %{
       "card" => ExFsrs.to_map(log.card),
-      "rating" => log.rating,
+      "rating" => Atom.to_string(log.rating),
       "review_datetime" => DateTime.to_iso8601(log.review_datetime),
       "review_duration" => log.review_duration
     }

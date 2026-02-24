@@ -217,18 +217,7 @@ defmodule ExFsrs.Scheduler do
 
   defp update_review_card(card, rating, review_datetime, scheduler) do
     {stability, difficulty} =
-      if days_since_last_review(card, review_datetime) < 1 do
-        {short_term_stability(card.stability, rating, scheduler),
-         next_difficulty(card.difficulty, rating, scheduler)}
-      else
-        {next_stability(
-           card.difficulty,
-           card.stability,
-           get_retrievability(card, review_datetime, scheduler),
-           rating,
-           scheduler
-         ), next_difficulty(card.difficulty, rating, scheduler)}
-      end
+      compute_stability_difficulty(card, rating, review_datetime, scheduler)
 
     {next_state, next_step, next_due} =
       handle_review_rating(rating, stability, review_datetime, scheduler)
@@ -266,18 +255,7 @@ defmodule ExFsrs.Scheduler do
 
   defp update_relearning_card(card, rating, review_datetime, scheduler) do
     {stability, difficulty} =
-      if days_since_last_review(card, review_datetime) < 1 do
-        {short_term_stability(card.stability, rating, scheduler),
-         next_difficulty(card.difficulty, rating, scheduler)}
-      else
-        {next_stability(
-           card.difficulty,
-           card.stability,
-           get_retrievability(card, review_datetime, scheduler),
-           rating,
-           scheduler
-         ), next_difficulty(card.difficulty, rating, scheduler)}
-      end
+      compute_stability_difficulty(card, rating, review_datetime, scheduler)
 
     {next_state, next_step, next_due} =
       handle_relearning_steps(card, rating, stability, review_datetime, scheduler)
@@ -614,6 +592,9 @@ defmodule ExFsrs.Scheduler do
   @doc """
   Calculates the retrievability of a card at a given time.
   """
+  def get_retrievability(%{stability: nil}, _review_datetime, _scheduler), do: 0
+  def get_retrievability(%{stability: s}, _review_datetime, _scheduler) when s <= 0, do: 0
+
   def get_retrievability(card, review_datetime, scheduler) do
     case card.last_review do
       nil ->

@@ -38,7 +38,7 @@ defmodule ExFsrs.ReviewLogTest do
       map = ExFsrs.ReviewLog.to_map(log)
 
       assert map["card"]["card_id"] == 12_345
-      assert map["rating"] == :good
+      assert map["rating"] == "good"
       assert map["review_datetime"] == DateTime.to_iso8601(now)
       assert map["review_duration"] == duration
     end
