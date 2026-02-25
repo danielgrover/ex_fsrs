@@ -13,26 +13,47 @@ defmodule ExFsrs.Scheduler do
   @maximum_interval 36_500
   @stability_min 0.001
   @default_parameters [
+    # w[0]: initial stability for Again rating
     0.212,
+    # w[1]: initial stability for Hard rating
     1.2931,
+    # w[2]: initial stability for Good rating
     2.3065,
+    # w[3]: initial stability for Easy rating
     8.2956,
+    # w[4]: initial difficulty base
     6.4133,
+    # w[5]: initial difficulty scaling factor
     0.8334,
+    # w[6]: difficulty change multiplier per rating deviation
     3.0194,
+    # w[7]: difficulty mean reversion strength
     0.001,
+    # w[8]: recall stability increase factor
     1.8722,
+    # w[9]: recall stability decay exponent
     0.1666,
+    # w[10]: recall retrievability sensitivity
     0.796,
+    # w[11]: post-lapse stability base multiplier
     1.4835,
+    # w[12]: post-lapse difficulty negative power
     0.0614,
+    # w[13]: post-lapse previous stability power
     0.2629,
+    # w[14]: post-lapse retrievability sensitivity
     1.6483,
+    # w[15]: hard penalty multiplier
     0.6014,
+    # w[16]: easy bonus multiplier
     1.8729,
+    # w[17]: short-term stability change rate
     0.5425,
+    # w[18]: short-term rating offset
     0.0912,
+    # w[19]: short-term last-stability decay exponent
     0.0658,
+    # w[20]: power forgetting curve decay constant
     0.1542
   ]
 
