@@ -155,4 +155,42 @@ defmodule ExFsrs.EdgeCasesTest do
       assert card_23h.stability == card_0d.stability
     end
   end
+
+  describe "zero stability crash (pow(0.0, negative))" do
+    test "stability 0.0 in short-term path does not crash" do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
+
+      card =
+        ExFsrs.new(
+          state: :learning,
+          step: 0,
+          stability: 0.0,
+          difficulty: 5.0,
+          last_review: @start_datetime
+        )
+
+      {updated_card, _} = ExFsrs.Scheduler.review_card(scheduler, card, :good, @start_datetime)
+
+      assert is_number(updated_card.stability)
+      assert updated_card.stability >= 0.001
+    end
+
+    test "stability 0.0 in long-term (review state) path does not crash" do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
+      review_at = DateTime.add(@start_datetime, 2, :day)
+
+      card =
+        ExFsrs.new(
+          state: :review,
+          stability: 0.0,
+          difficulty: 5.0,
+          last_review: @start_datetime
+        )
+
+      {updated_card, _} = ExFsrs.Scheduler.review_card(scheduler, card, :good, review_at)
+
+      assert is_number(updated_card.stability)
+      assert updated_card.stability >= 0.001
+    end
+  end
 end

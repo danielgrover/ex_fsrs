@@ -338,7 +338,7 @@ defmodule ExFsrs.Scheduler do
 
   defp compute_stability_difficulty(card, rating, review_datetime, scheduler) do
     cond do
-      is_nil(card.stability) or is_nil(card.difficulty) ->
+      is_nil(card.stability) or is_nil(card.difficulty) or card.stability <= 0 ->
         {initial_stability(rating, scheduler), initial_difficulty(rating, scheduler)}
 
       days_since_last_review(card, review_datetime) < 1 ->
