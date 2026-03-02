@@ -1,7 +1,7 @@
-> **Fork of [open-spaced-repetition/ex_fsrs](https://github.com/open-spaced-repetition/ex_fsrs)**
-> Updated to FSRS-6 (21 parameters) using AI-assisted development.
-> Cross-validated against ts-fsrs, py-fsrs, and fsrs-rs test suites.
-> Built for personal use — use at your own risk.
+> **⚠️ Fork Notice:** Fork of [open-spaced-repetition/ex_fsrs](https://github.com/open-spaced-repetition/ex_fsrs) updated from FSRS v5 (19-parameter) to **FSRS v6 (21-parameter)**.
+> 
+> * **Validation:** Verified for parity by cross-checking against the `ts-fsrs`, `py-fsrs`, and `fsrs-rs` test suites. 
+> * **Disclaimer:** Maintained for personal use; support and stability are best-effort—use at your own risk.
 
 # ExFsrs
 
