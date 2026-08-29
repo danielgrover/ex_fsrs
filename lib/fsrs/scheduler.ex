@@ -12,6 +12,7 @@ defmodule ExFsrs.Scheduler do
   @relearning_steps [10.0]
   @maximum_interval 36_500
   @stability_min 0.001
+  @parameter_count 21
   @default_parameters [
     # w[0]: initial stability for Again rating
     0.212,
@@ -101,8 +102,9 @@ defmodule ExFsrs.Scheduler do
   def new(opts \\ []) do
     parameters = Keyword.get(opts, :parameters, @default_parameters)
 
-    if length(parameters) != 21 do
-      raise ArgumentError, "expected 21 parameters, got #{length(parameters)}"
+    if Enum.count_until(parameters, @parameter_count + 1) != @parameter_count do
+      raise ArgumentError,
+            "expected #{@parameter_count} parameters, got #{length(parameters)}"
     end
 
     desired_retention = Keyword.get(opts, :desired_retention, 0.9)
@@ -165,22 +167,6 @@ defmodule ExFsrs.Scheduler do
     {updated_card, review_log}
   end
 
-  defp update_learning_card(card, rating, review_datetime, %{learning_steps: []} = scheduler) do
-    stability = initial_stability(rating, scheduler)
-    difficulty = initial_difficulty(rating, scheduler)
-    days = next_interval(stability, scheduler)
-
-    %{
-      card
-      | state: :review,
-        step: nil,
-        stability: stability,
-        difficulty: difficulty,
-        due: DateTime.add(review_datetime, days, :day),
-        last_review: review_datetime
-    }
-  end
-
   defp update_learning_card(card, rating, review_datetime, scheduler) do
     {stability, difficulty} =
       compute_stability_difficulty(card, rating, review_datetime, scheduler)
@@ -199,9 +185,20 @@ defmodule ExFsrs.Scheduler do
     }
   end
 
+  # With no learning steps configured, every rating graduates straight to review.
+  defp handle_learning_steps(
+         _card,
+         _rating,
+         stability,
+         review_datetime,
+         %{learning_steps: []} = scheduler
+       ) do
+    days = maybe_fuzz(next_interval(stability, scheduler), scheduler)
+    {:review, nil, DateTime.add(review_datetime, days, :day)}
+  end
+
   defp handle_learning_steps(_card, :again, _stability, review_datetime, scheduler) do
-    {:learning, 0,
-     DateTime.add(review_datetime, round(Enum.at(scheduler.learning_steps, 0, 1)), :minute)}
+    {:learning, 0, add_minutes(review_datetime, Enum.at(scheduler.learning_steps, 0, 1))}
   end
 
   # When step >= length for hard/good/easy, graduate to review
@@ -214,7 +211,7 @@ defmodule ExFsrs.Scheduler do
 
   defp handle_learning_steps(card, :hard, _stability, review_datetime, scheduler) do
     interval = hard_interval(card.step, scheduler.learning_steps)
-    {:learning, card.step, DateTime.add(review_datetime, round(interval), :minute)}
+    {:learning, card.step, add_minutes(review_datetime, interval)}
   end
 
   defp handle_learning_steps(card, :good, stability, review_datetime, scheduler) do
@@ -223,11 +220,7 @@ defmodule ExFsrs.Scheduler do
       {:review, nil, DateTime.add(review_datetime, days, :day)}
     else
       {:learning, card.step + 1,
-       DateTime.add(
-         review_datetime,
-         round(Enum.at(scheduler.learning_steps, card.step + 1, 10)),
-         :minute
-       )}
+       add_minutes(review_datetime, Enum.at(scheduler.learning_steps, card.step + 1, 10))}
     end
   end
 
@@ -265,8 +258,7 @@ defmodule ExFsrs.Scheduler do
   end
 
   defp handle_review_rating(:again, _stability, review_datetime, scheduler) do
-    {:relearning, 0,
-     DateTime.add(review_datetime, round(Enum.at(scheduler.relearning_steps, 0)), :minute)}
+    {:relearning, 0, add_minutes(review_datetime, Enum.at(scheduler.relearning_steps, 0))}
   end
 
   defp handle_review_rating(_rating, stability, review_datetime, scheduler) do
@@ -292,27 +284,33 @@ defmodule ExFsrs.Scheduler do
     }
   end
 
-  defp handle_relearning_steps(_card, :again, _stability, review_datetime, scheduler) do
-    {:relearning, 0,
-     DateTime.add(
-       review_datetime,
-       round(Enum.at(scheduler.relearning_steps, 0, 10)),
-       :minute
-     )}
+  # With no relearning steps configured, every rating graduates straight to review.
+  defp handle_relearning_steps(
+         _card,
+         _rating,
+         stability,
+         review_datetime,
+         %{relearning_steps: []} = scheduler
+       ) do
+    days = maybe_fuzz(next_interval(stability, scheduler), scheduler)
+    {:review, nil, DateTime.add(review_datetime, days, :day)}
   end
 
-  # When steps are empty or step >= length, graduate to review for hard/good/easy
+  defp handle_relearning_steps(_card, :again, _stability, review_datetime, scheduler) do
+    {:relearning, 0, add_minutes(review_datetime, Enum.at(scheduler.relearning_steps, 0, 10))}
+  end
+
+  # When step >= length, graduate to review for hard/good/easy
   defp handle_relearning_steps(card, rating, stability, review_datetime, scheduler)
        when rating in [:hard, :good, :easy] and
-              (scheduler.relearning_steps == [] or
-                 card.step >= length(scheduler.relearning_steps)) do
+              card.step >= length(scheduler.relearning_steps) do
     days = maybe_fuzz(next_interval(stability, scheduler), scheduler)
     {:review, nil, DateTime.add(review_datetime, days, :day)}
   end
 
   defp handle_relearning_steps(card, :hard, _stability, review_datetime, scheduler) do
     interval = hard_interval(card.step, scheduler.relearning_steps)
-    {:relearning, card.step, DateTime.add(review_datetime, round(interval), :minute)}
+    {:relearning, card.step, add_minutes(review_datetime, interval)}
   end
 
   defp handle_relearning_steps(card, :good, stability, review_datetime, scheduler) do
@@ -321,11 +319,7 @@ defmodule ExFsrs.Scheduler do
       {:review, nil, DateTime.add(review_datetime, days, :day)}
     else
       {:relearning, card.step + 1,
-       DateTime.add(
-         review_datetime,
-         round(Enum.at(scheduler.relearning_steps, card.step + 1, 10)),
-         :minute
-       )}
+       add_minutes(review_datetime, Enum.at(scheduler.relearning_steps, card.step + 1, 10))}
     end
   end
 
@@ -354,6 +348,12 @@ defmodule ExFsrs.Scheduler do
            scheduler
          ), next_difficulty(card.difficulty, rating, scheduler)}
     end
+  end
+
+  # Learning/relearning steps are fractional minutes (e.g. 5.5); keep that
+  # precision by scheduling in seconds rather than rounding to whole minutes.
+  defp add_minutes(datetime, minutes) do
+    DateTime.add(datetime, round(minutes * 60), :second)
   end
 
   defp hard_interval(0, [first]) do

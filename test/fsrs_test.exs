@@ -223,9 +223,14 @@ defmodule ExFsrsTest do
 
       {updated_card, _log} = ExFsrs.review_card(card, :good, now, 1000)
 
+      # same result as going through Scheduler.review_card/5 with a default scheduler
+      {expected, _} =
+        ExFsrs.Scheduler.review_card(ExFsrs.Scheduler.new(), card, :good, now, 1000)
+
       assert updated_card.state == :learning
-      assert is_number(updated_card.stability)
-      assert is_number(updated_card.difficulty)
+      assert updated_card.stability == expected.stability
+      assert updated_card.difficulty == expected.difficulty
+      assert updated_card.due == expected.due
       assert updated_card.last_review == now
     end
   end
@@ -241,9 +246,12 @@ defmodule ExFsrsTest do
       ]
 
       rescheduled = ExFsrs.reschedule_card(card, logs)
+      expected = ExFsrs.Scheduler.reschedule_card(ExFsrs.Scheduler.new(), card, logs)
+
       assert rescheduled.card_id == 42
-      assert is_number(rescheduled.stability)
-      assert is_number(rescheduled.difficulty)
+      assert rescheduled.state == expected.state
+      assert rescheduled.stability == expected.stability
+      assert rescheduled.difficulty == expected.difficulty
     end
   end
 end

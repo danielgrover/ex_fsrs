@@ -224,8 +224,8 @@ defmodule ExFsrs.ReferenceTest do
       {card, _} = ExFsrs.Scheduler.review_card(scheduler, card, :hard, now)
       assert card.state == :learning
       assert card.step == 0
-      # (1 + 10) / 2 = 5.5 minutes, rounded to 6
-      assert DateTime.diff(card.due, now, :minute) == 6
+      # (1 + 10) / 2 = 5.5 minutes, scheduled to the second like py-fsrs
+      assert DateTime.diff(card.due, now, :second) == 330
     end
 
     test "easy immediately graduates to review", %{scheduler: scheduler, card: card, now: now} do
@@ -435,7 +435,7 @@ defmodule ExFsrs.ReferenceTest do
 
   describe "py-fsrs test_long_term_stability_learning_state" do
     test "relearning card reviewed a day late uses long-term stability" do
-      scheduler = ExFsrs.Scheduler.new()
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
       card = ExFsrs.new(state: :learning, step: 0)
 
       # Graduate to review with easy
@@ -446,10 +446,16 @@ defmodule ExFsrs.ReferenceTest do
       {card, _} = ExFsrs.Scheduler.review_card(scheduler, card, :again, card.due)
       assert card.state == :relearning
 
+      assert_in_delta card.stability, 1.3886324609821161, 1.0e-9
+
       # Review a full day after due (triggers long-term stability calculation)
       late_review = DateTime.add(card.due, 1, :day)
       {card, _} = ExFsrs.Scheduler.review_card(scheduler, card, :good, late_review)
       assert card.state == :review
+
+      # Long-term (not short-term) formula: py-fsrs golden value
+      assert_in_delta card.stability, 3.594938000169363, 1.0e-9
+      assert_in_delta card.difficulty, 7.0151909490243805, 1.0e-9
     end
   end
 
@@ -685,6 +691,107 @@ defmodule ExFsrs.ReferenceTest do
     end
   end
 
+  # A card can be sitting in :learning/:relearning under a scheduler whose step
+  # list is empty -- restored from storage, or after a config change. py-fsrs
+  # sends it straight to review while carrying its memory state forward; these
+  # goldens come from py-fsrs run on the identical sequence.
+  describe "empty steps meeting a card that already has memory state" do
+    setup do
+      two_steps = ExFsrs.Scheduler.new(learning_steps: [1.0, 10.0], enable_fuzzing: false)
+      no_steps = ExFsrs.Scheduler.new(learning_steps: [], enable_fuzzing: false)
+
+      # good under the two-step scheduler leaves the card in :learning WITH stability
+      card = ExFsrs.new(state: :learning, step: 0, due: @start_datetime)
+      {card, _} = ExFsrs.Scheduler.review_card(two_steps, card, :good, @start_datetime)
+
+      assert card.state == :learning
+      assert card.stability == 2.3065
+
+      {:ok, card: card, no_steps: no_steps, now: DateTime.add(@start_datetime, 3, :day)}
+    end
+
+    test "learning card keeps its stability when learning_steps is empty", ctx do
+      expected = [
+        {:again, 0.6368506992409603, 7.394502741279718, 1},
+        {:hard, 9.234870781784839, 4.752858488532557, 9},
+        {:good, 13.826903694354568, 2.111214235785395, 14},
+        {:easy, 23.88306407915667, 1.0, 24}
+      ]
+
+      for {rating, stability, difficulty, days} <- expected do
+        {card, _} = ExFsrs.Scheduler.review_card(ctx.no_steps, ctx.card, rating, ctx.now)
+
+        assert card.state == :review
+        assert card.step == nil
+
+        assert_in_delta card.stability,
+                        stability,
+                        1.0e-9,
+                        "#{rating}: stability #{card.stability} != #{stability}"
+
+        assert_in_delta card.difficulty, difficulty, 1.0e-9
+        assert DateTime.diff(card.due, ctx.now, :day) == days
+      end
+    end
+
+    test "relearning card graduates on every rating when relearning_steps is empty" do
+      with_steps = ExFsrs.Scheduler.new(relearning_steps: [10.0], enable_fuzzing: false)
+      no_steps = ExFsrs.Scheduler.new(relearning_steps: [], enable_fuzzing: false)
+
+      card = ExFsrs.new(state: :learning, step: 0, due: @start_datetime)
+      {card, _} = ExFsrs.Scheduler.review_card(with_steps, card, :easy, @start_datetime)
+      lapsed_at = DateTime.add(@start_datetime, 5, :day)
+      {card, _} = ExFsrs.Scheduler.review_card(with_steps, card, :again, lapsed_at)
+      assert card.state == :relearning
+
+      now = DateTime.add(lapsed_at, 1, :day)
+
+      expected = [
+        # :again is the interesting one -- it must not linger in :relearning
+        {:again, 0.3740643231596631, 9.008020057195637, 1},
+        {:hard, 2.647570175947621, 8.011605503110008, 3},
+        {:good, 3.5241207293151597, 7.0151909490243805, 4},
+        {:easy, 5.44369167270333, 6.018776394938751, 5}
+      ]
+
+      for {rating, stability, difficulty, days} <- expected do
+        {updated, _} = ExFsrs.Scheduler.review_card(no_steps, card, rating, now)
+
+        assert updated.state == :review,
+               "#{rating} should graduate to review, got #{updated.state}"
+
+        assert updated.step == nil
+        assert_in_delta updated.stability, stability, 1.0e-9
+        assert_in_delta updated.difficulty, difficulty, 1.0e-9
+        assert DateTime.diff(updated.due, now, :day) == days
+      end
+    end
+
+    test "empty learning_steps still fuzzes the graduating interval" do
+      fuzzed = ExFsrs.Scheduler.new(learning_steps: [], enable_fuzzing: true)
+
+      card =
+        ExFsrs.new(
+          state: :learning,
+          step: 0,
+          stability: 30.0,
+          difficulty: 5.0,
+          last_review: @start_datetime
+        )
+
+      now = DateTime.add(@start_datetime, 30, :day)
+
+      days =
+        for _ <- 1..200 do
+          {updated, _} = ExFsrs.Scheduler.review_card(fuzzed, card, :good, now)
+          DateTime.diff(updated.due, now, :day)
+        end
+
+      assert MapSet.size(MapSet.new(days)) > 1,
+             "fuzzing must apply on the empty-learning-steps path, got #{inspect(Enum.uniq(days))}"
+    end
+  end
+
   describe "py-fsrs test_relearning_card_rate_hard_two_relearning_steps" do
     test "hard at step 0 gives avg of steps, hard at step 1 gives step 1" do
       scheduler =
@@ -700,12 +807,12 @@ defmodule ExFsrs.ReferenceTest do
       assert card.state == :relearning
       assert card.step == 0
 
-      # Hard at step 0: (1 + 10) / 2 = 5.5 minutes, rounded to 6
+      # Hard at step 0: (1 + 10) / 2 = 5.5 minutes, scheduled to the second
       prev_due = card.due
       {card, _} = ExFsrs.Scheduler.review_card(scheduler, card, :hard, prev_due)
       assert card.state == :relearning
       assert card.step == 0
-      assert DateTime.diff(card.due, prev_due, :minute) == 6
+      assert DateTime.diff(card.due, prev_due, :second) == 330
 
       # Good to advance to step 1
       {card, _} = ExFsrs.Scheduler.review_card(scheduler, card, :good, card.due)

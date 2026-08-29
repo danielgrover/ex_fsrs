@@ -5,7 +5,7 @@ defmodule ExFsrs.SchedulerTest do
     test "creates new scheduler with default parameters" do
       scheduler = ExFsrs.Scheduler.new()
 
-      assert length(scheduler.parameters) == 21
+      assert Enum.count_until(scheduler.parameters, 22) == 21
       assert scheduler.desired_retention == 0.9
       assert scheduler.learning_steps == [1.0, 10.0]
       assert scheduler.relearning_steps == [10.0]
@@ -137,7 +137,9 @@ defmodule ExFsrs.SchedulerTest do
       {updated_card, _log} = ExFsrs.Scheduler.review_card(scheduler, card, :good, now)
 
       assert updated_card.state == :learning
-      assert is_number(updated_card.stability)
+      assert updated_card.step == 1
+      assert updated_card.stability == 2.3065
+      assert_in_delta updated_card.difficulty, 2.118103970459016, 1.0e-9
     end
   end
 
@@ -158,8 +160,9 @@ defmodule ExFsrs.SchedulerTest do
 
       {updated_card, _log} = ExFsrs.Scheduler.review_card(scheduler, card, :good, now)
 
-      assert is_number(updated_card.stability)
-      assert is_number(updated_card.difficulty)
+      # a nil on either side means "new card": both fall back to the initial values
+      assert updated_card.stability == 2.3065
+      assert_in_delta updated_card.difficulty, 2.118103970459016, 1.0e-9
     end
 
     test "treats card with only difficulty nil as initial" do
@@ -178,8 +181,8 @@ defmodule ExFsrs.SchedulerTest do
 
       {updated_card, _log} = ExFsrs.Scheduler.review_card(scheduler, card, :good, now)
 
-      assert is_number(updated_card.stability)
-      assert is_number(updated_card.difficulty)
+      assert updated_card.stability == 2.3065
+      assert_in_delta updated_card.difficulty, 2.118103970459016, 1.0e-9
     end
   end
 
@@ -223,6 +226,54 @@ defmodule ExFsrs.SchedulerTest do
     end
   end
 
+  describe "relearning step overflow graduation" do
+    # Mirrors the learning-step case: a card parked at a step index the current
+    # scheduler no longer has. Goldens from py-fsrs on the same inputs.
+    setup do
+      scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false, relearning_steps: [10.0])
+      start = ~U[2022-11-29 12:30:00Z]
+
+      card = %ExFsrs{
+        card_id: 1,
+        state: :relearning,
+        step: 1,
+        stability: 5.0,
+        difficulty: 5.0,
+        due: start,
+        last_review: start
+      }
+
+      {:ok, scheduler: scheduler, card: card, now: DateTime.add(start, 2, :day)}
+    end
+
+    test "hard/good/easy graduate when step >= length of relearning_steps", ctx do
+      expected = [
+        {:hard, 8.623545704277777, 6.665995369296838, 9},
+        {:good, 11.025184077615195, 4.9902283692968386, 11},
+        {:easy, 16.284567258965495, 3.3144613692968385, 16}
+      ]
+
+      for {rating, stability, difficulty, days} <- expected do
+        {updated, _} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, rating, ctx.now)
+
+        assert updated.state == :review, "#{rating} should graduate"
+        assert updated.step == nil
+        assert_in_delta updated.stability, stability, 1.0e-9
+        assert_in_delta updated.difficulty, difficulty, 1.0e-9
+        assert DateTime.diff(updated.due, ctx.now, :day) == days
+      end
+    end
+
+    test "again still restarts relearning at step 0", ctx do
+      {updated, _} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :again, ctx.now)
+
+      assert updated.state == :relearning
+      assert updated.step == 0
+      assert_in_delta updated.stability, 0.8776886959219631, 1.0e-9
+      assert DateTime.diff(updated.due, ctx.now, :second) == 600
+    end
+  end
+
   describe "enable_fuzzing affects interval calculations" do
     test "fuzzing changes the due date for review cards" do
       scheduler_no_fuzz = ExFsrs.Scheduler.new(enable_fuzzing: false)
@@ -260,7 +311,9 @@ defmodule ExFsrs.SchedulerTest do
 
       rescheduled = ExFsrs.Scheduler.reschedule_card(scheduler, card, [log])
       assert rescheduled.card_id == 100
-      assert is_number(rescheduled.stability)
+      assert rescheduled.state == :learning
+      assert rescheduled.step == 1
+      assert rescheduled.stability == 2.3065
     end
 
     test "accepts maps with ExFsrs card struct" do
@@ -276,7 +329,9 @@ defmodule ExFsrs.SchedulerTest do
 
       rescheduled = ExFsrs.Scheduler.reschedule_card(scheduler, card, [log])
       assert rescheduled.card_id == 100
-      assert is_number(rescheduled.stability)
+      assert rescheduled.state == :learning
+      assert rescheduled.step == 1
+      assert rescheduled.stability == 2.3065
     end
 
     test "accepts maps with plain card_id field" do
@@ -292,7 +347,9 @@ defmodule ExFsrs.SchedulerTest do
 
       rescheduled = ExFsrs.Scheduler.reschedule_card(scheduler, card, [log])
       assert rescheduled.card_id == 100
-      assert is_number(rescheduled.stability)
+      assert rescheduled.state == :learning
+      assert rescheduled.step == 1
+      assert rescheduled.stability == 2.3065
     end
   end
 end

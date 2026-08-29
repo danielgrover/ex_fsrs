@@ -24,34 +24,35 @@ defmodule ExFsrs.AlgorithmValidationTest do
     test "again: stability=0.212, difficulty=6.4133, state=learning, interval=0 days", ctx do
       {card, _log} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :again, ctx.now)
 
-      assert_in_delta card.stability, 0.212, 0.0001
-      assert_in_delta card.difficulty, 6.4133, 0.0001
+      assert_in_delta card.stability, 0.212, 1.0e-9
+      assert_in_delta card.difficulty, 6.4133, 1.0e-9
       assert card.state == :learning
-      assert DateTime.diff(card.due, ctx.now, :day) == 0
+      assert DateTime.diff(card.due, ctx.now, :second) == 60
     end
 
     test "hard: stability=1.2931, difficulty=5.1122, state=learning, interval=0 days", ctx do
       {card, _log} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :hard, ctx.now)
 
-      assert_in_delta card.stability, 1.2931, 0.0001
-      assert_in_delta card.difficulty, 5.1122, 0.01
+      assert_in_delta card.stability, 1.2931, 1.0e-9
+      assert_in_delta card.difficulty, 5.112170705601056, 1.0e-9
       assert card.state == :learning
-      assert DateTime.diff(card.due, ctx.now, :day) == 0
+      # hard at step 0 of [1, 10] -> (1 + 10) / 2 = 5.5 minutes
+      assert DateTime.diff(card.due, ctx.now, :second) == 330
     end
 
     test "good: stability=2.3065, difficulty=2.1181, state=learning, interval=0 days", ctx do
       {card, _log} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :good, ctx.now)
 
-      assert_in_delta card.stability, 2.3065, 0.0001
-      assert_in_delta card.difficulty, 2.1181, 0.01
+      assert_in_delta card.stability, 2.3065, 1.0e-9
+      assert_in_delta card.difficulty, 2.118103970459016, 1.0e-9
       assert card.state == :learning
-      assert DateTime.diff(card.due, ctx.now, :day) == 0
+      assert DateTime.diff(card.due, ctx.now, :second) == 600
     end
 
     test "easy: stability=8.2956, difficulty=1.0 (clamped), state=review, interval=8 days", ctx do
       {card, _log} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :easy, ctx.now)
 
-      assert_in_delta card.stability, 8.2956, 0.0001
+      assert_in_delta card.stability, 8.2956, 1.0e-9
       assert card.difficulty == 1.0
       assert card.state == :review
       assert DateTime.diff(card.due, ctx.now, :day) == 8
@@ -98,6 +99,22 @@ defmodule ExFsrs.AlgorithmValidationTest do
     test "new card with nil last_review returns 0" do
       card = ExFsrs.new(state: :learning, step: 0)
       assert ExFsrs.get_retrievability(card, @start_datetime) == 0
+    end
+
+    test "review dated before last_review clamps elapsed to 0 rather than exceeding 1.0" do
+      card =
+        ExFsrs.new(
+          state: :review,
+          stability: 10.0,
+          difficulty: 5.0,
+          last_review: @start_datetime
+        )
+
+      scheduler = ExFsrs.Scheduler.new()
+      earlier = DateTime.add(@start_datetime, -5, :day)
+
+      # py-fsrs floors elapsed_days at 0; without that, R would exceed 1.0
+      assert ExFsrs.Scheduler.get_retrievability(card, earlier, scheduler) == 1.0
     end
 
     test "card with last_review at elapsed=0 returns 1.0 (no decay)" do
@@ -195,6 +212,12 @@ defmodule ExFsrs.AlgorithmValidationTest do
 
       assert card_good.stability < card_easy.stability,
              "good #{card_good.stability} should be < easy #{card_easy.stability}"
+
+      # py-fsrs golden values for the same inputs
+      assert_in_delta card_again.stability, 1.3919869729546932, 1.0e-9
+      assert_in_delta card_hard.stability, 23.246875110466814, 1.0e-9
+      assert_in_delta card_good.stability, 32.02672948198672, 1.0e-9
+      assert_in_delta card_easy.stability, 51.253861646812936, 1.0e-9
     end
   end
 
@@ -218,10 +241,13 @@ defmodule ExFsrs.AlgorithmValidationTest do
       {card_good, _} = ExFsrs.Scheduler.review_card(scheduler, card, :good, @start_datetime)
       {card_easy, _} = ExFsrs.Scheduler.review_card(scheduler, card, :easy, @start_datetime)
 
-      assert_in_delta card_again.difficulty, 8.34176237, 0.01
-      assert_in_delta card_hard.difficulty, 6.66599536, 0.01
-      assert_in_delta card_good.difficulty, 4.99022837, 0.01
-      assert_in_delta card_easy.difficulty, 3.31446137, 0.01
+      # Tolerance is tight on purpose: at 0.01 this passes even if
+      # mean-reversion clamps its target to 1.0 instead of using the raw
+      # (negative) initial difficulty for Easy, which is the reference behaviour.
+      assert_in_delta card_again.difficulty, 8.341762369296838, 1.0e-9
+      assert_in_delta card_hard.difficulty, 6.665995369296838, 1.0e-9
+      assert_in_delta card_good.difficulty, 4.9902283692968386, 1.0e-9
+      assert_in_delta card_easy.difficulty, 3.3144613692968385, 1.0e-9
     end
 
     test "difficulty stays clamped in [1.0, 10.0] after extreme ratings" do
@@ -419,7 +445,7 @@ defmodule ExFsrs.AlgorithmValidationTest do
 
     test "exactly 21 parameters succeeds" do
       scheduler = ExFsrs.Scheduler.new(parameters: List.duplicate(1.0, 21))
-      assert length(scheduler.parameters) == 21
+      assert scheduler.parameters == List.duplicate(1.0, 21)
     end
   end
 
@@ -447,22 +473,22 @@ defmodule ExFsrs.AlgorithmValidationTest do
 
     test "again decreases stability", ctx do
       {card, _} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :again, ctx.now)
-      assert_in_delta card.stability, 1.596818, 0.01
+      assert_in_delta card.stability, 1.5968179979869215, 1.0e-9
     end
 
     test "hard preserves stability via clamp", ctx do
       {card, _} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :hard, ctx.now)
-      assert_in_delta card.stability, 5.0, 0.01
+      assert card.stability == 5.0
     end
 
     test "good preserves stability via clamp", ctx do
       {card, _} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :good, ctx.now)
-      assert_in_delta card.stability, 5.0, 0.01
+      assert card.stability == 5.0
     end
 
     test "easy increases stability", ctx do
       {card, _} = ExFsrs.Scheduler.review_card(ctx.scheduler, ctx.card, :easy, ctx.now)
-      assert_in_delta card.stability, 8.12960956, 0.01
+      assert_in_delta card.stability, 8.129609559916112, 1.0e-9
     end
   end
 
@@ -488,7 +514,7 @@ defmodule ExFsrs.AlgorithmValidationTest do
       review_at = DateTime.add(@start_datetime, 5, :day)
       {card, _} = ExFsrs.Scheduler.review_card(scheduler, card, :again, review_at)
 
-      assert_in_delta card.stability, 1.05253961, 0.01
+      assert_in_delta card.stability, 1.0525396080650788, 1.0e-9
     end
   end
 end

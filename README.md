@@ -48,7 +48,7 @@ Add ExFsrs as a dependency in your `mix.exs`:
 ```elixir
 def deps do
   [
-    {:ex_fsrs, "~> 0.1.0", git: "https://github.com/danielgrover/ex_fsrs"}
+    {:ex_fsrs, "~> 0.2.0", git: "https://github.com/danielgrover/ex_fsrs"}
   ]
 end
 ```
