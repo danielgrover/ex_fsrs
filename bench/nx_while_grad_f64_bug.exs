@@ -8,6 +8,26 @@
 # tests in nx/test/nx/defn/grad_test.exs are all f32, which is why this passes CI.
 #
 #     mix run bench/nx_while_grad_f64_bug.exs
+defmodule AdjointScaling do
+  import Nx.Defn
+
+  # The loop body is identical in both. Only what happens downstream differs.
+  defn loop(x, opts \\ []) do
+    {acc, _i, _x} =
+      while {acc = Nx.tensor(0.0, type: opts[:type]), i = 0, x = x}, Nx.less(i, 3) do
+        {acc + x, i + 1, x}
+      end
+
+    acc
+  end
+
+  defn plain(x, opts \\ []), do: grad(x, fn x -> loop(x, type: opts[:type]) end)
+
+  defn scaled(x, opts \\ []) do
+    grad(x, fn x -> loop(x, type: opts[:type]) * Nx.tensor(2.0, type: opts[:type]) end)
+  end
+end
+
 defmodule WhileGradDtype do
   import Nx.Defn
 
@@ -33,6 +53,22 @@ defmodule WhileGradDtype do
   defn grad_f64(x, opts \\ []), do: grad(x, fn x -> pow_f64(x, n: opts[:n]) end)
 end
 
+IO.puts("An additive loop, scaled outside. Body identical; only the adjoint differs.\n")
+IO.puts("dtype | grad(loop) | grad(loop * 2.0) | expected 3.0 / 6.0")
+
+for type <- [:f32, :f64] do
+  x = Nx.tensor(2.0, type: type)
+  plain = Nx.to_number(AdjointScaling.plain(x, type: type))
+  scaled = Nx.to_number(AdjointScaling.scaled(x, type: type))
+
+  IO.puts(
+    " #{type} | #{String.pad_leading(:erlang.float_to_binary(plain, decimals: 4), 10)} |" <>
+      " #{String.pad_leading(:erlang.float_to_binary(scaled, decimals: 4), 16)} |" <>
+      " #{if abs(scaled - 6.0) < 1.0e-6, do: "ok", else: "BAD"}"
+  )
+end
+
+IO.puts("\nSame loop computing x^n, adjoint scaled by x inside the loop.\n")
 IO.puts("  n |        f32 grad |        f64 grad |        analytic")
 
 for n <- [1, 2, 3, 4, 8, 16] do

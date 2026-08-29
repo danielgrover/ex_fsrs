@@ -1,4 +1,4 @@
-# Nx: `grad` through `while` returns zeros for f64 multiplicative bodies
+# Nx: `grad` through `while` is wrong for f64 adjoints
 
 Handoff notes for filing upstream at [elixir-nx/nx](https://github.com/elixir-nx/nx)
 and attempting a fix. Everything below was reproduced locally; nothing is inferred.
@@ -9,68 +9,101 @@ Runnable reproduction: [`bench/nx_while_grad_f64_bug.exs`](nx_while_grad_f64_bug
 
 ## Summary
 
-`grad` through a `while` loop silently returns zeros (or near-zero garbage) when
-the loop's accumulator is **f64** and the body **multiplies**. The same loop in
-f32 is correct. Nothing raises.
+`grad` through a `while` loop silently returns wrong values — usually zero — when
+the gradient flowing into the loop is **f64** and has to be scaled by anything
+other than 1. The identical loop in f32 is correct. Nothing raises.
+
+The clearest demonstration keeps the loop body byte-identical and changes only
+what happens *downstream* of it:
 
 ```elixir
-defn pow(x, opts \\ []) do
+defn loop(x) do
   {acc, _i, _x} =
-    while {acc = Nx.tensor(1.0, type: opts[:type]), i = 0, x = x}, Nx.less(i, 3) do
-      {acc * x, i + 1, x}
+    while {acc = Nx.tensor(0.0, type: :f64), i = 0, x = x}, Nx.less(i, 3) do
+      {acc + x, i + 1, x}
     end
 
   acc
 end
 
-defn g(x, opts \\ []), do: grad(x, fn x -> pow(x, type: opts[:type]) end)
-
-g(Nx.tensor(2.0, type: :f32), type: :f32)  #=> 12.0   correct (d/dx x³ at 2)
-g(Nx.tensor(2.0, type: :f64), type: :f64)  #=>  0.0   wrong
+defn plain(x),  do: grad(x, &loop/1)                                        #=> 3.0  correct
+defn scaled(x), do: grad(x, fn x -> loop(x) * Nx.tensor(2.0, type: :f64) end) #=> 0.0  expected 6.0
 ```
+
+The loop is purely additive and correct on its own. Multiplying its *result* by
+two — entirely outside the loop — collapses the gradient to zero.
 
 ## Evidence
 
-Same loop computing `x^n`, analytic gradient `n·x^(n-1)`, `x = 1.02`:
+### The incoming gradient is what matters
+
+Loop body identical in every row; only the downstream scaling differs:
+
+| carry | downstream | incoming adjoint | gradient | correct? |
+|---|---|---|---|---|
+| f64 | none | 1 | 3.0 | ✅ |
+| f64 | `* 1.0` | 1 | 3.0 | ✅ |
+| f64 | `* 2.0` | 2 | **0.0** | ❌ (want 6.0) |
+| f32 | none | 1 | 3.0 | ✅ |
+| f32 | `* 2.0` | 2 | 6.0 | ✅ |
+
+Scaling by 1.0 is fine; scaling by 2.0 is not. An adjoint of 1 needs no
+multiplication, which is what masks the defect.
+
+### f64 anywhere is enough
+
+| carry type | scaling constant | correct? |
+|---|---|---|
+| f64 | bare literal `2.0` | ❌ |
+| f64 | f64 | ❌ |
+| f64 | f32 | ❌ |
+| f32 | f64 | ❌ |
+| f32 | f32 / bare literal | ✅ |
+
+An f64 carry *or* an f64 adjoint is sufficient to break it. Only the fully-f32
+path is correct.
+
+### Trip counts
+
+Same loop computing `x^n`, analytic gradient `n·x^(n-1)`, `x = 1.02`. Here the
+adjoint is scaled by `x` inside the loop, so f64 fails at every trip count:
 
 ```
   n |        f32 grad |        f64 grad |        analytic
   1 |      1.0000 ok  |      0.0000 BAD | 1.0000
   2 |      2.0400 ok  |     -0.0000 BAD | 2.0400
-  3 |      3.1212 ok  |     -0.0000 BAD | 3.1212
   4 |      4.2448 ok  |      0.0557 BAD | 4.2448
   8 |      9.1895 ok  |      0.0001 BAD | 9.1895
  16 |     21.5339 ok  |      0.0384 BAD | 21.5339
 ```
 
-f32 is correct at every trip count. f64 is wrong at every trip count, including
-`n = 1`.
+Note the result is not always exactly zero (`0.0557` at n = 4), so this is
+corrupted arithmetic rather than a simple drop to zero.
 
 ## Scope — what does and does not fail
 
-| loop body | dtype | gradient | correct? |
-|---|---|---|---|
-| `acc + x` | f64 | 3.0 | ✅ |
-| `acc * 2.0` (constant Jacobian) | f64 | 0.0 | ❌ |
-| `acc * x` (state-dependent Jacobian) | f64 | 0.0 | ❌ |
-| `acc * x` | f32 | 12.0 | ✅ |
-| `x * x * x`, no loop, hand-unrolled | f64 | 12.0 | ✅ |
+| construct | dtype | correct? |
+|---|---|---|
+| `acc + x`, `acc - x`, `acc + (x + x)` | f64 | ✅ |
+| `acc + 0.0`, `acc * 1.0` (identities) | f64 | ✅ |
+| `acc + x * 2.0` | f64 | ❌ |
+| `acc * x` | f64 | ❌ |
+| `(additive loop) * 2.0` | f64 | ❌ |
+| all of the above | f32 | ✅ |
+| `x * x * x`, no loop at all | f64 | ✅ |
 
 Two things this rules out:
 
-- **Not f64 autodiff generally** — the hand-unrolled f64 product is correct, so
+- **Not f64 autodiff generally.** The hand-unrolled f64 product is correct, so
   only the `while` path is affected.
-- **Not the reverse-order VJP issue** ([#1747](https://github.com/elixir-nx/nx/issues/1747))
-  — that is about state-dependent Jacobians, but here a *constant* Jacobian
-  (`acc * 2.0`) fails too, while an additive body succeeds.
+- **Not the loop body, and not multiplication per se.** `acc * 1.0` is fine, and
+  a purely additive loop still fails once its result is scaled outside.
+- **Not the reverse-order VJP issue** ([#1747](https://github.com/elixir-nx/nx/issues/1747)).
+  That concerns state-dependent Jacobians; here a constant-Jacobian body fails
+  and an additive one succeeds.
 
-The discriminator is **addition versus multiplication**. Addition's VJP passes
-the adjoint through unchanged; multiplication's VJP must multiply the adjoint by
-the other operand's **forward value**. So the defect is in recovering or typing
-that forward value in f64.
-
-That the result is exactly `0.0` — not merely inaccurate — suggests the adjoint
-is being multiplied by a zeroed tensor rather than accumulated wrongly.
+The unifying rule: **an f64 adjoint that must be multiplied by a non-unit value
+inside the while-gradient comes out corrupted.**
 
 ## Versions
 
@@ -98,23 +131,25 @@ uses f32. The f64 path has no coverage.
 `nx/lib/nx/defn/grad.ex`, `defp update_grads(:while, [initial, arg, condition, body], ...)`
 (~86 lines on main).
 
-Working hypothesis: a type mismatch in the reverse loop's state carry. Candidates
-in that function, in rough order of suspicion:
+The failure is in how the incoming adjoints (`gs`) are typed and carried into the
+reverse loop, not in the body's own differentiation. Candidates in that function:
 
-1. `zero = Expr.tensor(0)` and the `k_arg` / `j_arg` counters built from it —
-   these seed the rematerialization loop, and an untyped-or-default constant
-   flowing into an f64 composite could coerce state to zeros.
-2. `select_composite(remat?, body, s0_arg)` and
-   `select_composite(remat?, grad_args_tuple, grad_body_tuple)` — if the two
-   branches disagree on type, the f64 branch may be lost.
-3. `gs = Enum.zip_with(gs, flatten_initial, &Nx.broadcast/2)` — `Nx.broadcast/2`
-   copies *shape* from the template but not *type*, so an f32 incoming adjoint
-   would stay f32 against an f64 initial.
+1. `gs = Enum.zip_with(gs, flatten_initial, &Nx.broadcast/2)` — `Nx.broadcast/2`
+   takes *shape* from the template but leaves the type alone, so an adjoint whose
+   type disagrees with its corresponding `initial` element stays mismatched.
+2. `zero = Expr.tensor(0)` and the `index_arg` / `k_arg` / `j_arg` parameters
+   built from it. These are created without an explicit type and are threaded
+   through the same composite as the f64 state.
+3. `select_composite(remat?, grad_args_tuple, grad_body_tuple)` — if the two
+   branches disagree on type, the f64 branch may be coerced or dropped.
 
-The failure at `n = 1` is informative: with a single iteration the
+That an adjoint of exactly 1 works while 2 does not points at the multiplication
+of the adjoint specifically, rather than at its transport through the loop.
+
+Failure at `n = 1` is also informative: with a single iteration the
 rematerialization phase is skipped entirely (`remat?` is false immediately), so
-whatever is wrong is present even on the simplest path through the reverse loop,
-not only in the O(n²) replay.
+the defect is on the simplest path through the reverse loop, not in the O(n²)
+replay added by the #1747 fix.
 
 ## Suggested fix shape
 
