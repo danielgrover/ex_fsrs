@@ -29,6 +29,7 @@ if Code.ensure_loaded?(Nx) do
     alias ExFsrs.Optimizer.Data
     alias ExFsrs.Optimizer.Loss
     alias ExFsrs.Optimizer.Model
+    alias ExFsrs.Optimizer.Model.Batched
 
     @num_epochs 5
     @mini_batch_size 512
@@ -112,6 +113,11 @@ if Code.ensure_loaded?(Nx) do
       * `:on_step` — a one-argument function called after each gradient step
         with `%{step:, loss:, gradient:, params:}`. Useful for progress
         reporting and for comparing a run against a reference trace.
+
+      * `:model` — `:batched` (default) advances every card in a minibatch
+        together; `:scalar` walks reviews one at a time. Same arithmetic, and
+        the two are diffed against each other in the test suite, but `:scalar`
+        is markedly slower. It is kept as the reference implementation.
     """
     def compute_optimal_parameters(logs, opts \\ []) do
       sequences = Data.build_sequences(logs)
@@ -171,6 +177,7 @@ if Code.ensure_loaded?(Nx) do
       upper = Nx.tensor(@upper_bounds, type: :f64)
 
       on_step = Keyword.get(opts, :on_step, fn _ -> :ok end)
+      model = Keyword.get(opts, :model, :batched)
 
       by_id = Map.new(sequences)
       card_ids = Enum.map(sequences, fn {card_id, _reviews} -> card_id end)
@@ -185,7 +192,8 @@ if Code.ensure_loaded?(Nx) do
 
           ordered = Enum.map(card_ids, fn card_id -> {card_id, Map.fetch!(by_id, card_id)} end)
 
-          {params, adam, step} = run_epoch(params, adam, ordered, lower, upper, step, on_step)
+          {params, adam, step} =
+            run_epoch(params, adam, ordered, lower, upper, step, on_step, model)
 
           loss = batch_loss(sequences, params)
 
@@ -205,13 +213,15 @@ if Code.ensure_loaded?(Nx) do
 
     # One epoch: cut the ordered reviews into minibatches of @mini_batch_size
     # scored reviews and take a gradient step after each.
-    defp run_epoch(params, adam, ordered, lower, upper, step, on_step) do
+    defp run_epoch(params, adam, ordered, lower, upper, step, on_step, model) do
       ordered
       |> chunk()
       |> Enum.reduce({params, adam, nil, step}, fn chunk, {params, adam, carry, step} ->
+        prepared = prepare_chunk(model, chunk, carry)
+
         {loss, gradient} =
           Nx.Defn.value_and_grad(params, fn p ->
-            {loss, _carry_out} = chunk_loss(p, chunk, carry)
+            {loss, _carry_out} = chunk_forward(model, p, prepared)
             loss
           end)
 
@@ -219,7 +229,7 @@ if Code.ensure_loaded?(Nx) do
         # the parameters in force during that minibatch and then detached, as
         # torch does. Recomputing it outside the traced function is what
         # detaches it; a forward pass costs ~2% of the gradient pass.
-        {_loss, carry_out} = chunk_loss(params, chunk, carry)
+        {_loss, carry_out} = chunk_forward(model, params, prepared)
 
         {adam, params} = Adam.step(adam, params, gradient)
         # Nx.clip/3 takes scalar bounds; these are per-parameter.
@@ -235,6 +245,20 @@ if Code.ensure_loaded?(Nx) do
         {params, adam, carry_out, step + 1}
       end)
       |> then(fn {params, adam, _carry, step} -> {params, adam, step} end)
+    end
+
+    # The scalar model consumes the chunk directly; the batched one needs its
+    # padded tensors built first, which is parameter-independent and so is done
+    # once and reused by both the gradient and carry passes.
+    defp prepare_chunk(:scalar, chunk, carry), do: {chunk, carry}
+    defp prepare_chunk(:batched, chunk, carry), do: Batched.prepare(chunk, carry)
+
+    defp chunk_forward(:scalar, params, {chunk, carry}), do: chunk_loss(params, chunk, carry)
+
+    defp chunk_forward(:batched, params, batch) do
+      {loss, stability, difficulty} = Batched.run(params, batch)
+
+      {loss, {stability, difficulty}}
     end
 
     defp chunk_loss(params, chunk, carry) do
@@ -261,6 +285,27 @@ if Code.ensure_loaded?(Nx) do
         {total, Model.step(params, state, review.rating, review.elapsed_days), scored}
       end)
     end
+
+    @doc """
+    The minibatches of one epoch, as lists of segments.
+
+    Exposed so the batched model can be diffed against the scalar one on exactly
+    the chunks the optimizer would produce.
+    """
+    def minibatches(sequences, card_order) do
+      by_id = Map.new(sequences)
+
+      card_order
+      |> Enum.map(fn card_id -> {card_id, Map.fetch!(by_id, card_id)} end)
+      |> chunk()
+    end
+
+    @doc """
+    Sums a chunk's loss with the scalar model, returning `{loss, carry_state}`.
+
+    The reference implementation the batched model is checked against.
+    """
+    def scalar_chunk_loss(params, chunk, carry), do: chunk_loss(params, chunk, carry)
 
     @doc """
     The number of scored reviews in each minibatch of one epoch.

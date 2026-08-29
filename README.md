@@ -221,10 +221,14 @@ day). `ExFsrs.Optimizer.batch_loss/2` scores a parameter set against a
 collection, which is the cheapest way to confirm the optimized weights actually
 beat the defaults on your data.
 
-Expect roughly 2.5 minutes for a 12,500-review collection (145s measured on an
-Apple M2, Nx's default `BinaryBackend`). py-fsrs does the same run in 19s, so
-this is around 8x slower than torch; cost grows a little faster than linearly
-with review count.
+Expect roughly 50 seconds for a 12,500-review collection (measured on an Apple
+M2, Nx's default `BinaryBackend`); py-fsrs does the same run in 19s. Cost grows
+a little faster than linearly with review count.
+
+Cards in a minibatch are advanced together as tensors rather than one review at
+a time, which is ~2.9x faster than the scalar formulation. Both are kept: pass
+`model: :scalar` for the reference implementation, which the test suite diffs
+the batched one against.
 
 This is a port of py-fsrs's optimizer and is verified against a recorded run of
 it (see `test/fixtures/`). Note that `fsrs-optimizer` and `fsrs-rs` — the latter
