@@ -287,8 +287,8 @@ if Code.ensure_loaded?(Nx) do
       end)
     end
 
-    defp chunk_value_and_grad(:batched, params, prepared, compiler) do
-      Batched.value_and_grad(params, prepared, compiler)
+    defp chunk_value_and_grad(:batched, params, prepared, _compiler) do
+      Batched.value_and_grad(params, prepared)
     end
 
     defp chunk_value_and_grad(:loop, params, prepared, compiler) do

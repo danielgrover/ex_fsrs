@@ -195,86 +195,35 @@ if Code.ensure_loaded?(Nx) do
     Loss and gradient for a whole minibatch, summed over its buckets.
 
     Buckets within a minibatch are independent, so the gradient of the summed
-    loss is the sum of the buckets' gradients. Differentiating each bucket on its
-    own is what lets a compiler key on that bucket's shape and reuse one
-    executable across every minibatch that rounds to the same shape.
+    loss is the sum of the buckets' gradients.
+
+    This model unrolls the timestep loop into the graph, so it is not usable with
+    a compiler — the graph grows with sequence length and XLA's compile time
+    grows superlinearly with it. `ExFsrs.Optimizer.Model.Loop` is the compilable
+    form.
     """
-    def value_and_grad(params, %__MODULE__{} = prepared, compiler \\ nil) do
+    def value_and_grad(params, %__MODULE__{} = prepared) do
       zero_gradient = Nx.broadcast(c(0.0), Nx.shape(params))
 
       Enum.reduce(prepared.buckets, {c(0.0), zero_gradient}, fn bucket, {total, gradient} ->
-        {loss, bucket_gradient} = bucket_value_and_grad(params, bucket, compiler)
+        {loss, bucket_gradient} =
+          Nx.Defn.value_and_grad(params, fn p ->
+            {loss, _stability, _difficulty} = run_bucket(p, bucket)
+            loss
+          end)
 
         {Nx.add(total, loss), Nx.add(gradient, bucket_gradient)}
       end)
     end
 
-    defp bucket_value_and_grad(params, bucket, nil) do
-      Nx.Defn.value_and_grad(params, fn p ->
-        {loss, _stability, _difficulty} = run_bucket(p, bucket)
-        loss
-      end)
-    end
-
-    defp bucket_value_and_grad(params, bucket, compiler) do
-      length = bucket.length
-
-      # The bucket's tensors are arguments rather than closed-over constants, so
-      # the compiler keys on their shapes instead of their contents.
-      fun = fn params, ratings, elapsed, labels, scored, valid, s0, d0, h0 ->
-        Nx.Defn.value_and_grad(params, fn p ->
-          {loss, _stability, _difficulty} =
-            run_columns(p, ratings, elapsed, labels, scored, valid, s0, d0, h0, length)
-
-          loss
-        end)
-      end
-
-      Nx.Defn.jit_apply(
-        fun,
-        [
-          params,
-          bucket.ratings,
-          bucket.elapsed,
-          bucket.labels,
-          bucket.scored,
-          bucket.valid,
-          bucket.stability0,
-          bucket.difficulty0,
-          bucket.has_state0
-        ],
-        compiler: compiler
-      )
-    end
-
+    # The bucket already carries its columns and initial state, so it is passed
+    # whole rather than unpacked into ten arguments.
     defp run_bucket(params, %Bucket{} = bucket) do
-      run_columns(
-        params,
-        bucket.ratings,
-        bucket.elapsed,
-        bucket.labels,
-        bucket.scored,
-        bucket.valid,
-        bucket.stability0,
-        bucket.difficulty0,
-        bucket.has_state0,
-        bucket.length
-      )
-    end
+      initial = {c(0.0), bucket.stability0, bucket.difficulty0, bucket.has_state0}
 
-    defp run_columns(params, ratings, elapsed, labels, scored, valid, s0, d0, h0, length) do
-      columns = %{
-        ratings: ratings,
-        elapsed: elapsed,
-        labels: labels,
-        scored: scored,
-        valid: valid
-      }
-
-      Enum.reduce(0..(length - 1), {c(0.0), s0, d0, h0}, fn t,
-                                                            {total, stability, difficulty,
-                                                             has_state} ->
-        step(params, columns, t, total, stability, difficulty, has_state)
+      Enum.reduce(0..(bucket.length - 1), initial, fn t,
+                                                      {total, stability, difficulty, has_state} ->
+        step(params, bucket, t, total, stability, difficulty, has_state)
       end)
       |> then(fn {total, stability, difficulty, _has_state} -> {total, stability, difficulty} end)
     end
