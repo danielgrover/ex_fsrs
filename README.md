@@ -242,61 +242,82 @@ computes f64 gradients through `while` correctly — released versions do not, a
 fail silently rather than raising, so `model: :loop` checks at startup and
 refuses to run otherwise. See `bench/NX_WHILE_GRAD_F64.md`.
 
-### Fitting the initial weights
+### The upgrades, and what they are worth
 
-`w[0..3]` are the stability a card gets after its first review, one per rating.
-By default they start at the FSRS-6 defaults, as py-fsrs does. Passing
-`initialize: true` measures them from the data first — grouping cards by first
-rating and fitting a forgetting curve to what actually happened — which is what
-`fsrs-optimizer` and `fsrs-rs` do:
+Three of `fsrs-optimizer`/`fsrs-rs`'s refinements are implemented, each off by
+default because each departs from the py-fsrs behaviour the parity tests pin:
 
 ```elixir
-ExFsrs.Optimizer.compute_optimal_parameters(logs, initialize: true)
+ExFsrs.Optimizer.compute_optimal_parameters(logs,
+  initialize: true,      # fit w[0..3] from data instead of starting at defaults
+  regularization: 1.0    # L2 pull toward the starting weights
+)
+
+# recency weighting is applied to the data rather than passed as an option
+weighted = ExFsrs.Optimizer.Data.apply_recency_weights(sequences, days_by_card)
 ```
 
-How much it helps depends entirely on how you measure, and the difference is
-worth understanding before trusting either number:
+Measured across 23 real collections from the Anki Revlogs 10K dataset, trained
+on each collection's past and scored on its future (`bench/temporal_eval.exs`),
+with the per-epoch card shuffle pinned so every variant sees identical
+conditions:
 
-| | card holdout | temporal |
-|---|---|---|
-| mean loss change | **-2.220%** | -0.516% |
-| collections improved | 16/23 | 11/23 |
-| Wilcoxon p | **0.002** | **0.89** |
+| variant | mean loss vs py-fsrs | collections improved | Wilcoxon p |
+|---|---|---|---|
+| `initialize` | +0.26% | 10/23 | 0.92 |
+| `regularization` alone | +0.67% | 12/23 | 0.78 |
+| both, γ=1 | +1.04% | 13/23 | 0.60 |
+| both, γ=2 | +1.32% | 14/23 | 0.29 |
+| both + recency | +0.85% | 14/23 | 0.34 |
 
-Held-out *cards* say initialization is a clear win. Held-out *future* says it is
-a coin flip. The temporal result is the one to believe: a scheduler's job is
-predicting the future, and `srs-benchmark` splits the same way. Fitting `w[0..3]`
-on a collection's past apparently describes that past better than it describes
-what comes next.
+**Every upgrade helps on average, and none of it is statistically significant.**
+A Friedman test across all six configurations gives p = 0.68. The means are
+ordered the way `fsrs-optimizer`'s design implies — each addition helping a
+little, and stacking — which is mildly reassuring, but nothing here can be
+claimed individually at this sample size.
 
-It is off by default, both because it departs from the py-fsrs behaviour the
-parity tests pin and because its benefit does not survive temporal evaluation.
+The obstacle is that per-collection effects are wildly inconsistent. For the
+best variant the improvement ranges from **+40.8% to -11.7%**, median +0.2%: a
+few atypical collections gain enormously and most gain nothing. Detecting a mean
+effect against that spread needs roughly **70-100 collections**, against the 23
+measured here.
 
-### L2 regularization
+Two cautions worth carrying, both learned the hard way:
 
-`regularization: 1.0` adds an L2 penalty pulling the parameters toward the
-weights training started from, as `fsrs-optimizer` and `fsrs-rs` do. The
-implementation is verified against fsrs-rs's own unit test for it, matching its
-expected penalty and gradients to f32 precision.
+* **Score held-out future, not held-out cards.** A card holdout rated
+  initialization at +2.2% (p = 0.002) and regularization at noise. Splitting the
+  same collections temporally reversed both. Held-out cards come from the period
+  the parameters were fitted on, so the fit flatters itself.
+* **Pin the shuffle.** The per-epoch card shuffle alone moves held-out loss by a
+  median of 2% run to run — as much as the largest difference between any two
+  variants. `bench/noise_floor.exs` measures it; any comparison that does not
+  control for it is reading noise.
 
-Like initialization, the answer depends on the split — in the opposite
-direction:
+### What the loss numbers do not say
 
-| | card holdout | temporal |
-|---|---|---|
-| mean loss change | +0.014% | **-1.333%** |
-| collections improved | 14/23 | 16/23 |
-| Wilcoxon p | 0.62 | 0.06 |
+Log loss understates what these parameters do to a schedule. Days until the next
+review, after a card's first review:
 
-On held-out cards L2 looks like noise. On held-out future it is the single
-largest effect measured, and the direction makes sense: regularization exists to
-stop a model fitting the past too closely, which is exactly what generalizing to
-the future needs. p = 0.06 is suggestive rather than settled.
+| collection | again | hard | good | easy |
+|---|---|---|---|---|
+| defaults | 1d | 1d | 2d | 8d |
+| 3929 | 1d | 1d | 4d | 8d |
+| 9861 | 4d | 29d | **70d** | 70d |
+| 9881 | 1d | 1d | 6d | 19d |
 
-Off by default, but on temporal evidence it is the more promising of the two.
+Collection 9861's fitted weights schedule a "Good" first review 70 days out
+where the defaults say 2 — a 35x difference — on a collection whose loss barely
+moved. Loss averages over thousands of reviews, most of them easy to predict
+either way; the interval is a direct function of stability.
 
-Note that regularization can only be judged on held-out data: it trades training
-fit for generalization, so on the data it trained on it always looks worse.
+That is the real shape of the result. The defaults are themselves the product of
+optimizing across ~20,000 collections, so they already are the average user's
+personalized weights, and a typical collection has nothing to gain. The value is
+concentrated in the atypical ones, where it is large.
+
+`ExFsrs.Optimizer.evaluate/2` reports RMSE(bins) alongside log loss, using
+`srs-benchmark`'s bin edges, so results here can be compared with the numbers
+the FSRS project publishes.
 
 This is a port of py-fsrs's optimizer and is verified against a recorded run of
 it (see `test/fixtures/`). `fsrs-optimizer` and `fsrs-rs` still do more: recency
