@@ -18,15 +18,21 @@ if Code.ensure_loaded?(Nx) do
     ## Scope
 
     This reproduces py-fsrs, which starts from the default parameters and runs
-    plain Adam on binary cross-entropy. The `fsrs-optimizer` Python package and
-    `fsrs-rs` (what Anki ships) do more: they fit `w[0..3]` from data before
-    training, add an L2 penalty toward the starting weights, weight samples by
-    recency, and drop outlier intervals. Those are not implemented here.
-    `ExFsrs.Optimizer.Loss.l2_penalty/3` exists as the seam for the second.
+    plain Adam on binary cross-entropy.
+
+    `:initialize` adds the first of `fsrs-optimizer`'s upgrades: fitting
+    `w[0..3]` from the data rather than starting them at the defaults. It is off
+    by default, since it departs from the behaviour the parity tests pin.
+
+    Still missing from `fsrs-optimizer` and `fsrs-rs` (what Anki ships): an L2
+    penalty toward the starting weights, recency weighting of samples, and
+    outlier removal. `ExFsrs.Optimizer.Loss.l2_penalty/3` is the seam for the
+    first of those.
     """
 
     alias ExFsrs.Optimizer.Adam
     alias ExFsrs.Optimizer.Data
+    alias ExFsrs.Optimizer.Initialization
     alias ExFsrs.Optimizer.Loss
     alias ExFsrs.Optimizer.Model
     alias ExFsrs.Optimizer.Model.Batched
@@ -117,6 +123,10 @@ if Code.ensure_loaded?(Nx) do
         with `%{step:, loss:, gradient:, params:}`. Useful for progress
         reporting and for comparing a run against a reference trace.
 
+      * `:initialize` — fit `w[0..3]` from the data before training instead of
+        starting them at the defaults, as `fsrs-optimizer` and `fsrs-rs` do.
+        Defaults to `false`, which keeps py-fsrs's behaviour.
+
       * `:model` — `:batched` (default) advances every card in a minibatch
         together; `:scalar` walks reviews one at a time. Same arithmetic, and
         the two are diffed against each other in the test suite, but `:scalar`
@@ -176,7 +186,12 @@ if Code.ensure_loaded?(Nx) do
 
     defp train(sequences, num_reviews, opts) do
       t_max = ceil(num_reviews / @mini_batch_size) * @num_epochs
-      params = Nx.tensor(ExFsrs.Scheduler.new().parameters, type: :f64)
+
+      params =
+        sequences
+        |> starting_parameters(Keyword.get(opts, :initialize, false))
+        |> Nx.tensor(type: :f64)
+
       adam = Adam.new(21, learning_rate: @learning_rate, t_max: t_max)
 
       card_orders = Keyword.get(opts, :card_orders)
@@ -227,6 +242,18 @@ if Code.ensure_loaded?(Nx) do
         end)
 
       best_params
+    end
+
+    # py-fsrs starts every run at the defaults. fsrs-optimizer and fsrs-rs first
+    # measure the initial-stability weights from the data, which is what
+    # `:initialize` turns on. It is off by default because it deliberately
+    # departs from the py-fsrs behaviour the parity tests pin.
+    defp starting_parameters(_sequences, false), do: ExFsrs.Scheduler.new().parameters
+
+    defp starting_parameters(sequences, true) do
+      defaults = ExFsrs.Scheduler.new().parameters
+
+      Initialization.initial_stability(sequences, defaults) ++ Enum.drop(defaults, 4)
     end
 
     defp epoch_order(nil, _epoch, card_ids), do: Enum.shuffle(card_ids)

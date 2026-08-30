@@ -242,13 +242,34 @@ computes f64 gradients through `while` correctly — released versions do not, a
 fail silently rather than raising, so `model: :loop` checks at startup and
 refuses to run otherwise. See `bench/NX_WHILE_GRAD_F64.md`.
 
+### Fitting the initial weights
+
+`w[0..3]` are the stability a card gets after its first review, one per rating.
+By default they start at the FSRS-6 defaults, as py-fsrs does. Passing
+`initialize: true` measures them from the data first — grouping cards by first
+rating and fitting a forgetting curve to what actually happened — which is what
+`fsrs-optimizer` and `fsrs-rs` do:
+
+```elixir
+ExFsrs.Optimizer.compute_optimal_parameters(logs, initialize: true)
+```
+
+Measured across four real collections, this improved every one:
+
+| collection | scored reviews | default start | fitted start | change |
+|---|---|---|---|---|
+| 3929 | 5,610 | 0.391302 | 0.390834 | 0.12% |
+| 9037 | 583 | 0.300988 | 0.299665 | 0.44% |
+| 9861 | 5,228 | 0.198691 | 0.172506 | 13.18% |
+| 9881 | 5,425 | 0.321106 | 0.319781 | 0.41% |
+
+It is off by default because it deliberately departs from the py-fsrs behaviour
+the parity tests pin.
+
 This is a port of py-fsrs's optimizer and is verified against a recorded run of
-it (see `test/fixtures/`). Note that `fsrs-optimizer` and `fsrs-rs` — the latter
-being what Anki ships — do more: they fit the initial-stability weights from
-data before training, add an L2 penalty toward the starting weights, weight
-samples by recency, and remove outlier intervals. None of that is implemented
-here, so these weights will be somewhat less accurate than Anki's, especially
-on small collections.
+it (see `test/fixtures/`). `fsrs-optimizer` and `fsrs-rs` — the latter being what
+Anki ships — still do more: an L2 penalty toward the starting weights, recency
+weighting of samples, and outlier removal. Those are not implemented here.
 
 ---
 
