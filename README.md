@@ -254,17 +254,10 @@ rating and fitting a forgetting curve to what actually happened — which is wha
 ExFsrs.Optimizer.compute_optimal_parameters(logs, initialize: true)
 ```
 
-Measured across four real collections, this improved every one:
-
-| collection | scored reviews | default start | fitted start | change |
-|---|---|---|---|---|
-| 3929 | 5,610 | 0.391302 | 0.390834 | 0.12% |
-| 9037 | 583 | 0.300988 | 0.299665 | 0.44% |
-| 9861 | 5,228 | 0.198691 | 0.172506 | 13.18% |
-| 9881 | 5,425 | 0.321106 | 0.319781 | 0.41% |
-
-It is off by default because it deliberately departs from the py-fsrs behaviour
-the parity tests pin.
+Measured on held-out cards across 23 real collections (`bench/holdout_eval.exs`),
+it lowered mean loss by **2.2%** and won on 16 of 23, with a median per-collection
+gain of 0.0009 and a best of 0.028 (Wilcoxon p = 0.002). It is off by default
+because it deliberately departs from the py-fsrs behaviour the parity tests pin.
 
 ### L2 regularization
 
@@ -273,13 +266,16 @@ weights training started from, as `fsrs-optimizer` and `fsrs-rs` do. The
 implementation is verified against fsrs-rs's own unit test for it, matching its
 expected penalty and gradients to f32 precision.
 
-Whether it *helps* is unproven here. Measured on held-out cards across three
-collections at several training sizes, the effect was within noise — four of six
-comparisons favoured it, two did not, all by under 1.1%, and the largest
-regression was on the thinnest training set, which is where it should have
-helped most. Establishing an effect would need far more collections than we have
-and a temporal split rather than a card holdout. It is off by default and
-offered as reference behaviour, not as a recommendation.
+Whether it *helps* is still unresolved. On held-out cards across 23 collections
+it won 14 of 23, which sounds encouraging, but the mean effect is **-0.014%** —
+frequent tiny wins offset by rarer larger losses — and neither a sign test
+(p = 0.40) nor a Wilcoxon signed-rank test (p = 0.62) can distinguish it from
+noise. There is no detectable relationship between its benefit and how thin the
+training data is (Spearman -0.29, p = 0.18), which is where it should help most.
+
+It is off by default and offered as reference behaviour, not a recommendation.
+For comparison, initialization over the same 23 collections gives Wilcoxon
+p = 0.002, so the method can detect an effect of that size when one is there.
 
 Note that regularization can only be judged on held-out data: it trades training
 fit for generalization, so on the data it trained on it always looks worse.

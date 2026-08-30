@@ -147,6 +147,17 @@ def main():
         "have too few scored reviews to train at all (the optimizer returns the "
         "defaults under 512), so skip ahead for something that exercises training.",
     )
+    parser.add_argument(
+        "--until",
+        type=int,
+        help="stop considering users at this rank (default: all of them)",
+    )
+    parser.add_argument(
+        "--spread",
+        action="store_true",
+        help="pick users evenly spaced across the considered range rather than "
+        "consecutively, so the sample covers a range of collection sizes",
+    )
     parser.add_argument("--user-ids", help="comma-separated user ids, overriding --users")
     args = parser.parse_args()
 
@@ -160,7 +171,16 @@ def main():
     else:
         print("listing users by size...")
         ranked = revlog_files(auth)
-        paths = [path for path, _size in ranked[args.skip : args.skip + args.users]]
+        until = args.until if args.until is not None else len(ranked)
+        window = ranked[args.skip : until]
+
+        if args.spread and len(window) > args.users:
+            step = len(window) / args.users
+            window = [window[int(i * step)] for i in range(args.users)]
+        else:
+            window = window[: args.users]
+
+        paths = [path for path, _size in window]
 
     total = sum(write_user(path, auth, out_dir) for path in paths)
     print(f"\n{len(paths)} users, {total} reviews -> {out_dir}")
