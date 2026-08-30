@@ -13,6 +13,33 @@ alias ExFsrs.Optimizer.Data
 
 base = [model: :loop, compiler: EXLA]
 
+# The optimizer shuffles card order each epoch, and that shuffle alone moves
+# held-out loss by ~2% run to run — as much as the largest difference between
+# any two variants. Pinning one ordering per collection and giving it to every
+# variant removes that noise from the comparison entirely, so what is left is
+# the variant.
+fixed_orders = fn sequences ->
+  card_ids = Enum.map(sequences, fn {card_id, _reviews} -> card_id end)
+
+  {orders, _seed} =
+    Enum.map_reduce(1..5, :rand.seed_s(:exsss, {17, 23, 42}), fn _epoch, seed ->
+      Enum.reduce(card_ids, {[], seed}, fn _card, {shuffled, seed} ->
+        {shuffled, seed}
+      end)
+      |> then(fn {_, seed} ->
+        {shuffled, seed} =
+          Enum.reduce(card_ids, {[], seed}, fn card, {acc, seed} ->
+            {position, seed} = :rand.uniform_s(length(card_ids), seed)
+            {[{position, card} | acc], seed}
+          end)
+
+        {shuffled |> Enum.sort() |> Enum.map(&elem(&1, 1)), seed}
+      end)
+    end)
+
+  orders
+end
+
 # Every upgrade, plus a gamma sweep, under the split that matters.
 variants = [
   {"py-fsrs", []},
@@ -54,7 +81,13 @@ rows =
         Enum.map(variants, fn {_name, opts} ->
           {recency, opts} = Keyword.pop(opts, :recency, false)
           set = if recency, do: weighted, else: train
-          parameters = Optimizer.compute_optimal_parameters(set, opts ++ base)
+
+          parameters =
+            Optimizer.compute_optimal_parameters(
+              set,
+              [card_orders: fixed_orders.(train)] ++ opts ++ base
+            )
+
           Optimizer.batch_loss(test, parameters)
         end)
 
