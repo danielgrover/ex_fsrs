@@ -31,20 +31,74 @@ if Code.ensure_loaded?(Nx) do
       )
     end
 
-    @doc """
-    L2 penalty pulling parameters toward their starting values.
+    # Expected spread of each parameter across collections, from fsrs-rs. A
+    # parameter that naturally varies a lot is penalized less for moving, so the
+    # penalty means the same thing for w[3] (initial stability for Easy, which
+    # ranges over tens of days) as for w[7] (difficulty mean reversion, which
+    # barely moves). fsrs-optimizer omits this and penalizes every parameter
+    # equally.
+    @params_stddev [
+      6.43,
+      9.66,
+      17.58,
+      27.85,
+      0.57,
+      0.28,
+      0.6,
+      0.12,
+      0.39,
+      0.18,
+      0.33,
+      0.3,
+      0.09,
+      0.16,
+      0.57,
+      0.25,
+      1.03,
+      0.31,
+      0.32,
+      0.14,
+      0.27
+    ]
 
-    Unused by the py-fsrs-compatible optimizer, which has no regularization.
-    Present so that `fsrs-optimizer`'s
-    `sum(square(w - init_w)) * gamma * batch_size / train_set_size` can be added
-    later without changing any call signature.
+    @doc "Per-parameter standard deviations used to scale the L2 penalty."
+    def params_stddev, do: @params_stddev
+
+    @doc """
+    L2 penalty pulling parameters toward the values training started from.
+
+    `gamma * batch_size / total_size * sum((w - initial)^2 / stddev^2)`, as
+    `fsrs-rs` computes it. The `batch_size / total_size` factor spreads one
+    collection-wide penalty across the minibatches, so the total pull over an
+    epoch does not depend on how the data happens to be divided.
+
+    Anchoring to the *starting* weights is what makes this worth having
+    alongside `:initialize` — with the initial-stability weights fitted from
+    data, the anchor is a measurement rather than a generic default.
     """
-    def l2_penalty(params, initial_params, gamma) do
+    def l2_penalty(params, initial, gamma, batch_size, total_size) do
       params
-      |> Nx.subtract(initial_params)
+      |> Nx.subtract(initial)
       |> Nx.pow(2)
+      |> Nx.divide(Nx.pow(stddev(), 2))
       |> Nx.sum()
-      |> Nx.multiply(gamma)
+      |> Nx.multiply(c(gamma * batch_size / total_size))
     end
+
+    @doc """
+    Gradient of `l2_penalty/5` with respect to the parameters.
+
+    `2 * gamma * batch_size / total_size * (w - initial) / stddev^2`. Derived
+    rather than differentiated: the penalty is a quadratic in the parameters, so
+    its gradient is exact in closed form and there is no reason to trace it.
+    """
+    def l2_gradient(params, initial, gamma, batch_size, total_size) do
+      params
+      |> Nx.subtract(initial)
+      |> Nx.divide(Nx.pow(stddev(), 2))
+      |> Nx.multiply(c(2 * gamma * batch_size / total_size))
+    end
+
+    defp stddev, do: Nx.tensor(@params_stddev, type: :f64)
   end
 end

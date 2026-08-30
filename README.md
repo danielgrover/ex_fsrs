@@ -266,9 +266,26 @@ Measured across four real collections, this improved every one:
 It is off by default because it deliberately departs from the py-fsrs behaviour
 the parity tests pin.
 
+### L2 regularization
+
+`regularization: 1.0` adds an L2 penalty pulling the parameters toward the
+weights training started from, as `fsrs-optimizer` and `fsrs-rs` do. The
+implementation is verified against fsrs-rs's own unit test for it, matching its
+expected penalty and gradients to f32 precision.
+
+Whether it *helps* is unproven here. Measured on held-out cards across three
+collections at several training sizes, the effect was within noise — four of six
+comparisons favoured it, two did not, all by under 1.1%, and the largest
+regression was on the thinnest training set, which is where it should have
+helped most. Establishing an effect would need far more collections than we have
+and a temporal split rather than a card holdout. It is off by default and
+offered as reference behaviour, not as a recommendation.
+
+Note that regularization can only be judged on held-out data: it trades training
+fit for generalization, so on the data it trained on it always looks worse.
+
 This is a port of py-fsrs's optimizer and is verified against a recorded run of
-it (see `test/fixtures/`). `fsrs-optimizer` and `fsrs-rs` — the latter being what
-Anki ships — still do more: an L2 penalty toward the starting weights, recency
+it (see `test/fixtures/`). `fsrs-optimizer` and `fsrs-rs` still do more: recency
 weighting of samples, and outlier removal. Those are not implemented here.
 
 ---

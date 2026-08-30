@@ -24,10 +24,12 @@ if Code.ensure_loaded?(Nx) do
     `w[0..3]` from the data rather than starting them at the defaults. It is off
     by default, since it departs from the behaviour the parity tests pin.
 
-    Still missing from `fsrs-optimizer` and `fsrs-rs` (what Anki ships): an L2
-    penalty toward the starting weights, recency weighting of samples, and
-    outlier removal. `ExFsrs.Optimizer.Loss.l2_penalty/3` is the seam for the
-    first of those.
+    `:regularization` adds the second: an L2 penalty toward the weights training
+    started from. It is verified against fsrs-rs's own test for it, but its
+    benefit is unproven on the collections measured here — see the README.
+
+    Still missing from `fsrs-optimizer` and `fsrs-rs` (what Anki ships): recency
+    weighting of samples, and outlier removal.
     """
 
     alias ExFsrs.Optimizer.Adam
@@ -123,6 +125,12 @@ if Code.ensure_loaded?(Nx) do
         with `%{step:, loss:, gradient:, params:}`. Useful for progress
         reporting and for comparing a run against a reference trace.
 
+      * `:regularization` — gamma for an L2 penalty pulling the parameters toward
+        the values training started from, as `fsrs-optimizer` and `fsrs-rs` do.
+        Defaults to `0.0`, which is off; both references use `1.0`. Most useful
+        together with `:initialize`, which makes the anchor a measurement rather
+        than a generic default.
+
       * `:initialize` — fit `w[0..3]` from the data before training instead of
         starting them at the defaults, as `fsrs-optimizer` and `fsrs-rs` do.
         Defaults to `false`, which keeps py-fsrs's behaviour.
@@ -192,6 +200,10 @@ if Code.ensure_loaded?(Nx) do
         |> starting_parameters(Keyword.get(opts, :initialize, false))
         |> Nx.tensor(type: :f64)
 
+      # The L2 anchor is where training started, so it is captured before the
+      # first step and never updated.
+      regularization = {params, Keyword.get(opts, :regularization, 0.0), num_reviews}
+
       adam = Adam.new(21, learning_rate: @learning_rate, t_max: t_max)
 
       card_orders = Keyword.get(opts, :card_orders)
@@ -230,7 +242,17 @@ if Code.ensure_loaded?(Nx) do
           ordered = Enum.map(card_ids, fn card_id -> {card_id, Map.fetch!(by_id, card_id)} end)
 
           {params, adam, step} =
-            run_epoch(params, adam, ordered, lower, upper, step, on_step, {model, compiler})
+            run_epoch(
+              params,
+              adam,
+              ordered,
+              lower,
+              upper,
+              step,
+              on_step,
+              {model, compiler},
+              regularization
+            )
 
           loss = batch_loss(sequences, params)
 
@@ -262,13 +284,26 @@ if Code.ensure_loaded?(Nx) do
 
     # One epoch: cut the ordered reviews into minibatches of @mini_batch_size
     # scored reviews and take a gradient step after each.
-    defp run_epoch(params, adam, ordered, lower, upper, step, on_step, {model, compiler}) do
+    defp run_epoch(
+           params,
+           adam,
+           ordered,
+           lower,
+           upper,
+           step,
+           on_step,
+           {model, compiler},
+           regularization
+         ) do
       ordered
       |> chunk()
       |> Enum.reduce({params, adam, nil, step}, fn chunk, {params, adam, carry, step} ->
         prepared = prepare_chunk(model, chunk, carry)
 
-        {loss, gradient} = chunk_value_and_grad(model, params, prepared, compiler)
+        {loss, gradient} =
+          model
+          |> chunk_value_and_grad(params, prepared, compiler)
+          |> regularize(params, chunk, regularization)
 
         # The state a card carries across a minibatch boundary is computed with
         # the parameters in force during that minibatch and then detached, as
@@ -298,6 +333,25 @@ if Code.ensure_loaded?(Nx) do
         {params, adam, carry_out, step + 1}
       end)
       |> then(fn {params, adam, _carry, step} -> {params, adam, step} end)
+    end
+
+    # fsrs-optimizer and fsrs-rs add an L2 pull toward the weights training
+    # started from, so a collection with thin evidence for some parameter cannot
+    # drag it far. The penalty is quadratic, so its gradient is added in closed
+    # form rather than traced.
+    defp regularize(result, _params, _chunk, {_initial, +0.0, _total}), do: result
+
+    defp regularize({loss, gradient}, params, chunk, {initial, gamma, total_size}) do
+      batch_size = scored_count(chunk)
+
+      {Nx.add(loss, Loss.l2_penalty(params, initial, gamma, batch_size, total_size)),
+       Nx.add(gradient, Loss.l2_gradient(params, initial, gamma, batch_size, total_size))}
+    end
+
+    defp scored_count(chunk) do
+      Enum.reduce(chunk, 0, fn segment, total ->
+        total + Enum.count(segment.reviews, & &1.counts_for_loss?)
+      end)
     end
 
     # The scalar model consumes the chunk directly; the batched one needs its
