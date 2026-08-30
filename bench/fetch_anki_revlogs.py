@@ -122,12 +122,15 @@ def write_user(path, auth, out_dir):
     ratings = table.column("rating").to_pylist()
     elapsed = table.column("elapsed_days").to_pylist()
     states = table.column("state").to_pylist() if "state" in columns else [None] * len(card_ids)
+    # Days since the user's first review: the only absolute timeline the dataset
+    # carries, and what a temporal train/test split needs.
+    offsets = table.column("day_offset").to_pylist() if "day_offset" in columns else [0] * len(card_ids)
 
     out = os.path.join(out_dir, f"user_{user}.csv")
     with open(out, "w") as f:
-        f.write("card_id,rating,elapsed_days,state\n")
-        for card_id, rating, days, state in zip(card_ids, ratings, elapsed, states):
-            f.write(f"{card_id},{rating},{days},{'' if state is None else state}\n")
+        f.write("card_id,rating,elapsed_days,day_offset,state\n")
+        for card_id, rating, days, offset, state in zip(card_ids, ratings, elapsed, offsets, states):
+            f.write(f"{card_id},{rating},{days},{offset},{'' if state is None else state}\n")
 
     cards = len(set(card_ids))
     scored = sum(1 for days in elapsed if days is not None and days > 0)
