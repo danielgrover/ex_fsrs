@@ -30,6 +30,7 @@ if Code.ensure_loaded?(Nx) do
     alias ExFsrs.Optimizer.Loss
     alias ExFsrs.Optimizer.Model
     alias ExFsrs.Optimizer.Model.Batched
+    alias ExFsrs.Optimizer.Model.Loop
 
     @num_epochs 5
     @mini_batch_size 512
@@ -230,7 +231,7 @@ if Code.ensure_loaded?(Nx) do
         # the parameters in force during that minibatch and then detached, as
         # torch does. Recomputing it outside the traced function is what
         # detaches it; a forward pass costs ~2% of the gradient pass.
-        {_loss, carry_out} = chunk_forward(model, params, prepared)
+        {_loss, carry_out} = chunk_forward(model, params, prepared, compiler)
 
         {adam, params} = Adam.step(adam, params, gradient)
         # Nx.clip/3 takes scalar bounds; these are per-parameter.
@@ -253,10 +254,11 @@ if Code.ensure_loaded?(Nx) do
     # once and reused by both the gradient and carry passes.
     defp prepare_chunk(:scalar, chunk, carry), do: {chunk, carry}
     defp prepare_chunk(:batched, chunk, carry), do: Batched.prepare(chunk, carry)
+    defp prepare_chunk(:loop, chunk, carry), do: Loop.prepare(chunk, carry)
 
     defp chunk_value_and_grad(:scalar, params, prepared, _compiler) do
       Nx.Defn.value_and_grad(params, fn p ->
-        {loss, _carry_out} = chunk_forward(:scalar, p, prepared)
+        {loss, _carry_out} = chunk_forward(:scalar, p, prepared, nil)
         loss
       end)
     end
@@ -265,10 +267,21 @@ if Code.ensure_loaded?(Nx) do
       Batched.value_and_grad(params, prepared, compiler)
     end
 
-    defp chunk_forward(:scalar, params, {chunk, carry}), do: chunk_loss(params, chunk, carry)
+    defp chunk_value_and_grad(:loop, params, prepared, compiler) do
+      Loop.loss_and_grad(params, prepared, compiler)
+    end
 
-    defp chunk_forward(:batched, params, batch) do
+    defp chunk_forward(:scalar, params, {chunk, carry}, _compiler),
+      do: chunk_loss(params, chunk, carry)
+
+    defp chunk_forward(:batched, params, batch, _compiler) do
       {loss, stability, difficulty} = Batched.run(params, batch)
+
+      {loss, {stability, difficulty}}
+    end
+
+    defp chunk_forward(:loop, params, batch, compiler) do
+      {loss, stability, difficulty} = Loop.run(params, batch, compiler)
 
       {loss, {stability, difficulty}}
     end

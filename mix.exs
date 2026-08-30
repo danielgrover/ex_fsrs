@@ -34,7 +34,7 @@ defmodule ExFsrs.MixProject do
   defp deps do
     [
       # Optional: only needed for ExFsrs.Optimizer. Scheduling stays dependency-free.
-      {:nx, github: "elixir-nx/nx", sparse: "nx", override: true, optional: true},
+      {:nx, path: "../nx/nx", override: true, optional: true},
       {:exla, "~> 0.13", optional: true},
       {:ex_slop, "~> 0.4", only: [:dev, :test], runtime: false},
       {:reach, "~> 2.0", only: [:dev, :test], runtime: false},

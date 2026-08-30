@@ -80,11 +80,21 @@ if Code.ensure_loaded?(Nx) do
           apply_bucket(&bucket_forward/9, params, bucket, compiler)
 
         case Enum.find_index(bucket.indices, &(&1 == prepared.last_index)) do
-          nil -> {Nx.add(total, loss), stability, difficulty}
-          row -> {Nx.add(total, loss), final_stability[row], final_difficulty[row]}
+          nil ->
+            {Nx.add(total, loss), stability, difficulty}
+
+          row ->
+            # Bring the carry back to the default backend. A compiler returns
+            # device-backed tensors, and letting those seed the next minibatch's
+            # `prepare/2` makes every tensor in it device-backed too, which turns
+            # a 33ms compiled minibatch into a 2s one. It is two scalars.
+            {Nx.add(total, loss), to_default(final_stability[row]),
+             to_default(final_difficulty[row])}
         end
       end)
     end
+
+    defp to_default(tensor), do: Nx.backend_copy(tensor, Nx.BinaryBackend)
 
     defp apply_bucket(fun, params, bucket, compiler) do
       args = [
