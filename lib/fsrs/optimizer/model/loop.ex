@@ -29,6 +29,35 @@ if Code.ensure_loaded?(Nx) do
     alias ExFsrs.Optimizer.Model.Batched
 
     @doc """
+    Whether the installed Nx computes f64 gradients through `while` correctly.
+
+    Nx returns silently wrong gradients — often zeros — when an f64 adjoint has
+    to be scaled inside a `while`, which is exactly what this model relies on.
+    Nothing raises, so an unpatched Nx would quietly train on garbage gradients.
+    The check differentiates a loop with a known answer.
+
+    See `bench/NX_WHILE_GRAD_F64.md`.
+    """
+    def supported? do
+      grad = Nx.to_number(support_probe(Nx.tensor(2.0, type: :f64)))
+
+      abs(grad - 6.0) < 1.0e-9
+    rescue
+      _ -> false
+    end
+
+    defn support_probe(x) do
+      grad(x, fn x ->
+        {acc, _i, _x} =
+          while {acc = Nx.tensor(0.0, type: :f64), i = 0, x = x}, Nx.less(i, 3) do
+            {acc + x, i + 1, x}
+          end
+
+        acc * Nx.tensor(2.0, type: :f64)
+      end)
+    end
+
+    @doc """
     Prepares a minibatch, reusing the batched model's padding and bucketing.
 
     Column tensors are transposed to `{timesteps, cards}` for loop indexing.

@@ -183,7 +183,21 @@ if Code.ensure_loaded?(Nx) do
 
       on_step = Keyword.get(opts, :on_step, fn _ -> :ok end)
       model = Keyword.get(opts, :model, :batched)
+
       compiler = Keyword.get(opts, :compiler)
+
+      if model == :loop and not Loop.supported?() do
+        raise ArgumentError, """
+        `model: :loop` needs an Nx that computes f64 gradients through `while`
+        correctly, and the installed one does not.
+
+        Nx returns silently wrong gradients — often zeros — when an f64 adjoint
+        is scaled inside a `while`. Nothing raises, so training would otherwise
+        proceed on garbage. See bench/NX_WHILE_GRAD_F64.md.
+
+        Use `model: :batched` (the default), which does not rely on `while`.
+        """
+      end
 
       by_id = Map.new(sequences)
       card_ids = Enum.map(sequences, fn {card_id, _reviews} -> card_id end)

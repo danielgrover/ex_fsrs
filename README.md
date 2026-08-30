@@ -230,6 +230,18 @@ a time, which is ~2.9x faster than the scalar formulation. Both are kept: pass
 `model: :scalar` for the reference implementation, which the test suite diffs
 the batched one against.
 
+A third model, `model: :loop`, expresses the timestep loop as a `defn` `while`
+so the expression graph stays a fixed size, which makes it compilable:
+
+```elixir
+ExFsrs.Optimizer.compute_optimal_parameters(logs, model: :loop, compiler: EXLA)
+```
+
+That runs the reference collection in ~25s. It requires `:exla` and an Nx that
+computes f64 gradients through `while` correctly — released versions do not, and
+fail silently rather than raising, so `model: :loop` checks at startup and
+refuses to run otherwise. See `bench/NX_WHILE_GRAD_F64.md`.
+
 This is a port of py-fsrs's optimizer and is verified against a recorded run of
 it (see `test/fixtures/`). Note that `fsrs-optimizer` and `fsrs-rs` — the latter
 being what Anki ships — do more: they fit the initial-stability weights from
