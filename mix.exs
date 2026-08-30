@@ -35,6 +35,7 @@ defmodule ExFsrs.MixProject do
     [
       # Optional: only needed for ExFsrs.Optimizer. Scheduling stays dependency-free.
       {:nx, "~> 0.13", optional: true},
+      {:exla, "~> 0.13", optional: true},
       {:ex_slop, "~> 0.4", only: [:dev, :test], runtime: false},
       {:reach, "~> 2.0", only: [:dev, :test], runtime: false},
       {:ex_dna, "~> 1.0", only: [:dev, :test], runtime: false},

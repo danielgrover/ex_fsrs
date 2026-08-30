@@ -118,6 +118,10 @@ if Code.ensure_loaded?(Nx) do
         together; `:scalar` walks reviews one at a time. Same arithmetic, and
         the two are diffed against each other in the test suite, but `:scalar`
         is markedly slower. It is kept as the reference implementation.
+
+      * `:compiler` — an `Nx.Defn` compiler such as `EXLA` for the batched
+        model. Minibatch shapes are rounded onto a small ladder so one compiled
+        executable is reused across many minibatches.
     """
     def compute_optimal_parameters(logs, opts \\ []) do
       sequences = Data.build_sequences(logs)
@@ -178,6 +182,7 @@ if Code.ensure_loaded?(Nx) do
 
       on_step = Keyword.get(opts, :on_step, fn _ -> :ok end)
       model = Keyword.get(opts, :model, :batched)
+      compiler = Keyword.get(opts, :compiler)
 
       by_id = Map.new(sequences)
       card_ids = Enum.map(sequences, fn {card_id, _reviews} -> card_id end)
@@ -193,7 +198,7 @@ if Code.ensure_loaded?(Nx) do
           ordered = Enum.map(card_ids, fn card_id -> {card_id, Map.fetch!(by_id, card_id)} end)
 
           {params, adam, step} =
-            run_epoch(params, adam, ordered, lower, upper, step, on_step, model)
+            run_epoch(params, adam, ordered, lower, upper, step, on_step, {model, compiler})
 
           loss = batch_loss(sequences, params)
 
@@ -213,17 +218,13 @@ if Code.ensure_loaded?(Nx) do
 
     # One epoch: cut the ordered reviews into minibatches of @mini_batch_size
     # scored reviews and take a gradient step after each.
-    defp run_epoch(params, adam, ordered, lower, upper, step, on_step, model) do
+    defp run_epoch(params, adam, ordered, lower, upper, step, on_step, {model, compiler}) do
       ordered
       |> chunk()
       |> Enum.reduce({params, adam, nil, step}, fn chunk, {params, adam, carry, step} ->
         prepared = prepare_chunk(model, chunk, carry)
 
-        {loss, gradient} =
-          Nx.Defn.value_and_grad(params, fn p ->
-            {loss, _carry_out} = chunk_forward(model, p, prepared)
-            loss
-          end)
+        {loss, gradient} = chunk_value_and_grad(model, params, prepared, compiler)
 
         # The state a card carries across a minibatch boundary is computed with
         # the parameters in force during that minibatch and then detached, as
@@ -252,6 +253,17 @@ if Code.ensure_loaded?(Nx) do
     # once and reused by both the gradient and carry passes.
     defp prepare_chunk(:scalar, chunk, carry), do: {chunk, carry}
     defp prepare_chunk(:batched, chunk, carry), do: Batched.prepare(chunk, carry)
+
+    defp chunk_value_and_grad(:scalar, params, prepared, _compiler) do
+      Nx.Defn.value_and_grad(params, fn p ->
+        {loss, _carry_out} = chunk_forward(:scalar, p, prepared)
+        loss
+      end)
+    end
+
+    defp chunk_value_and_grad(:batched, params, prepared, compiler) do
+      Batched.value_and_grad(params, prepared, compiler)
+    end
 
     defp chunk_forward(:scalar, params, {chunk, carry}), do: chunk_loss(params, chunk, carry)
 

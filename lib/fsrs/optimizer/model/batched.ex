@@ -45,6 +45,18 @@ if Code.ensure_loaded?(Nx) do
     # length; on the reference collection it cuts padded steps by ~2.5x.
     @bucket_size 32
 
+    # EXLA compiles one executable per distinct input shape, so a bucket's
+    # dimensions are rounded up onto these ladders and the slack is filled with
+    # masked-out rows and timesteps. That caps the whole run at a handful of
+    # compilations instead of one per minibatch. Under the default backend the
+    # rounding only adds a little masked work.
+    @row_sizes [4, 8, 16, 32]
+    @length_sizes [2, 4, 8, 16, 32, 64]
+
+    defp round_up(value, ladder) do
+      Enum.find(ladder, fn candidate -> candidate >= value end) || value
+    end
+
     defmodule Bucket do
       @moduledoc false
       defstruct [
@@ -93,12 +105,19 @@ if Code.ensure_loaded?(Nx) do
     end
 
     defp build_bucket(indexed_segments, carry, continues?) do
-      size = length(indexed_segments)
       indices = Enum.map(indexed_segments, fn {_segment, index} -> index end)
       segments = Enum.map(indexed_segments, fn {segment, _index} -> segment end)
 
-      max_length = segments |> Enum.map(&length(&1.reviews)) |> Enum.max()
-      rows = Enum.map(segments, &pad_row(&1.reviews, max_length))
+      max_length =
+        segments |> Enum.map(&length(&1.reviews)) |> Enum.max() |> round_up(@length_sizes)
+
+      size = round_up(length(segments), @row_sizes)
+
+      # Slack rows are all-padding: no valid timesteps, so they contribute no
+      # loss and never advance. They exist only to reach a canonical shape.
+      rows =
+        Enum.map(segments, &pad_row(&1.reviews, max_length)) ++
+          List.duplicate(pad_row([], max_length), size - length(segments))
 
       carry_row = if continues?, do: Enum.find_index(indices, &(&1 == 0))
       {stability0, difficulty0, has_state0} = initial_columns(size, carry_row, carry)
@@ -172,12 +191,90 @@ if Code.ensure_loaded?(Nx) do
       end)
     end
 
-    defp run_bucket(params, %Bucket{} = bucket) do
-      initial = {c(0.0), bucket.stability0, bucket.difficulty0, bucket.has_state0}
+    @doc """
+    Loss and gradient for a whole minibatch, summed over its buckets.
 
-      Enum.reduce(0..(bucket.length - 1), initial, fn t,
-                                                      {total, stability, difficulty, has_state} ->
-        step(params, bucket, t, total, stability, difficulty, has_state)
+    Buckets within a minibatch are independent, so the gradient of the summed
+    loss is the sum of the buckets' gradients. Differentiating each bucket on its
+    own is what lets a compiler key on that bucket's shape and reuse one
+    executable across every minibatch that rounds to the same shape.
+    """
+    def value_and_grad(params, %__MODULE__{} = prepared, compiler \\ nil) do
+      zero_gradient = Nx.broadcast(c(0.0), Nx.shape(params))
+
+      Enum.reduce(prepared.buckets, {c(0.0), zero_gradient}, fn bucket, {total, gradient} ->
+        {loss, bucket_gradient} = bucket_value_and_grad(params, bucket, compiler)
+
+        {Nx.add(total, loss), Nx.add(gradient, bucket_gradient)}
+      end)
+    end
+
+    defp bucket_value_and_grad(params, bucket, nil) do
+      Nx.Defn.value_and_grad(params, fn p ->
+        {loss, _stability, _difficulty} = run_bucket(p, bucket)
+        loss
+      end)
+    end
+
+    defp bucket_value_and_grad(params, bucket, compiler) do
+      length = bucket.length
+
+      # The bucket's tensors are arguments rather than closed-over constants, so
+      # the compiler keys on their shapes instead of their contents.
+      fun = fn params, ratings, elapsed, labels, scored, valid, s0, d0, h0 ->
+        Nx.Defn.value_and_grad(params, fn p ->
+          {loss, _stability, _difficulty} =
+            run_columns(p, ratings, elapsed, labels, scored, valid, s0, d0, h0, length)
+
+          loss
+        end)
+      end
+
+      Nx.Defn.jit_apply(
+        fun,
+        [
+          params,
+          bucket.ratings,
+          bucket.elapsed,
+          bucket.labels,
+          bucket.scored,
+          bucket.valid,
+          bucket.stability0,
+          bucket.difficulty0,
+          bucket.has_state0
+        ],
+        compiler: compiler
+      )
+    end
+
+    defp run_bucket(params, %Bucket{} = bucket) do
+      run_columns(
+        params,
+        bucket.ratings,
+        bucket.elapsed,
+        bucket.labels,
+        bucket.scored,
+        bucket.valid,
+        bucket.stability0,
+        bucket.difficulty0,
+        bucket.has_state0,
+        bucket.length
+      )
+    end
+
+    defp run_columns(params, ratings, elapsed, labels, scored, valid, s0, d0, h0, length) do
+      columns = %{
+        ratings: ratings,
+        elapsed: elapsed,
+        labels: labels,
+        scored: scored,
+        valid: valid
+      }
+
+      Enum.reduce(0..(length - 1), {c(0.0), s0, d0, h0}, fn t,
+                                                            {total, stability, difficulty,
+                                                             has_state} ->
+        step(params, columns, t, total, stability, difficulty, has_state)
       end)
       |> then(fn {total, stability, difficulty, _has_state} -> {total, stability, difficulty} end)
     end
