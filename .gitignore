@@ -31,3 +31,8 @@ CLAUDE.md
 # Anki Revlogs 10K data. Gated and separately licensed; fetch with
 # bench/fetch_anki_revlogs.py rather than committing it.
 /test/fixtures/anki/
+
+# Local secrets (Hugging Face token for the dataset fetch, etc.)
+.env
+.env.*
+!.env.example
