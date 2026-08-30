@@ -75,6 +75,7 @@ if Code.ensure_loaded?(Nx) do
           elapsed: Nx.transpose(bucket.elapsed),
           labels: Nx.transpose(bucket.labels),
           scored: Nx.transpose(bucket.scored),
+          weights: Nx.transpose(bucket.weights),
           valid: Nx.transpose(bucket.valid)
       }
     end
@@ -91,7 +92,8 @@ if Code.ensure_loaded?(Nx) do
       Enum.reduce(prepared.buckets, {Nx.tensor(0.0, type: :f64), zero_gradient}, fn bucket,
                                                                                     {total,
                                                                                      gradient} ->
-        {loss, bucket_gradient} = apply_bucket(&bucket_value_and_grad/9, params, bucket, compiler)
+        {loss, bucket_gradient} =
+          apply_bucket(&bucket_value_and_grad/10, params, bucket, compiler)
 
         {Nx.add(total, loss), Nx.add(gradient, bucket_gradient)}
       end)
@@ -106,7 +108,7 @@ if Code.ensure_loaded?(Nx) do
                                                                                {total, stability,
                                                                                 difficulty} ->
         {loss, final_stability, final_difficulty} =
-          apply_bucket(&bucket_forward/9, params, bucket, compiler)
+          apply_bucket(&bucket_forward/10, params, bucket, compiler)
 
         case Enum.find_index(bucket.indices, &(&1 == prepared.last_index)) do
           nil ->
@@ -132,6 +134,7 @@ if Code.ensure_loaded?(Nx) do
         bucket.elapsed,
         bucket.labels,
         bucket.scored,
+        bucket.weights,
         bucket.valid,
         bucket.stability0,
         bucket.difficulty0,
@@ -147,23 +150,34 @@ if Code.ensure_loaded?(Nx) do
 
     # --- everything below runs inside defn ---
 
-    defnp bucket_value_and_grad(params, ratings, elapsed, labels, scored, valid, s0, d0, h0) do
+    defnp bucket_value_and_grad(
+            params,
+            ratings,
+            elapsed,
+            labels,
+            scored,
+            weights,
+            valid,
+            s0,
+            d0,
+            h0
+          ) do
       value_and_grad(params, fn p ->
         {loss, _stability, _difficulty} =
-          sequence(p, ratings, elapsed, labels, scored, valid, s0, d0, h0)
+          sequence(p, ratings, elapsed, labels, scored, weights, valid, s0, d0, h0)
 
         loss
       end)
     end
 
-    defnp bucket_forward(params, ratings, elapsed, labels, scored, valid, s0, d0, h0) do
-      sequence(params, ratings, elapsed, labels, scored, valid, s0, d0, h0)
+    defnp bucket_forward(params, ratings, elapsed, labels, scored, weights, valid, s0, d0, h0) do
+      sequence(params, ratings, elapsed, labels, scored, weights, valid, s0, d0, h0)
     end
 
-    defnp sequence(params, ratings, elapsed, labels, scored, valid, s0, d0, h0) do
-      {_params, _ratings, _elapsed, _labels, _scored, _valid, total, stability, difficulty,
-       _has_state} =
-        while {params, ratings, elapsed, labels, scored, valid,
+    defnp sequence(params, ratings, elapsed, labels, scored, weights, valid, s0, d0, h0) do
+      {_params, _ratings, _elapsed, _labels, _scored, _weights, _valid, total, stability,
+       difficulty, _has_state} =
+        while {params, ratings, elapsed, labels, scored, weights, valid,
                total = Nx.tensor(0.0, type: :f64), stability = s0, difficulty = d0,
                has_state = h0},
               i <- 0..(Nx.axis_size(ratings, 0) - 1) do
@@ -174,6 +188,7 @@ if Code.ensure_loaded?(Nx) do
               elapsed[i],
               labels[i],
               scored[i],
+              weights[i],
               valid[i],
               total,
               stability,
@@ -181,7 +196,7 @@ if Code.ensure_loaded?(Nx) do
               has_state
             )
 
-          {params, ratings, elapsed, labels, scored, valid, total, stability, difficulty,
+          {params, ratings, elapsed, labels, scored, weights, valid, total, stability, difficulty,
            has_state}
         end
 
@@ -194,6 +209,7 @@ if Code.ensure_loaded?(Nx) do
             elapsed,
             label,
             scored,
+            weight,
             valid,
             total,
             stability,
@@ -208,7 +224,7 @@ if Code.ensure_loaded?(Nx) do
       # before the log keeps the discarded lanes finite.
       scored? = Nx.equal(scored, 1)
       safe = Nx.select(scored?, retrievability, f64(0.5))
-      total = total + Nx.sum(binary_cross_entropy(safe, label) * scored)
+      total = total + Nx.sum(binary_cross_entropy(safe, label) * scored * weight)
 
       first? = Nx.equal(has_state, 0)
       same_day? = Nx.less(elapsed, 1)

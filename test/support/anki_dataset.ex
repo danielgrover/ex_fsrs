@@ -168,6 +168,26 @@ defmodule ExFsrs.AnkiDataset do
     end)
   end
 
+  @doc """
+  Day offsets per card, aligned with that card's reviews in `sequences/1`.
+
+  Both take the card's reviews in order and truncate at the same length, so
+  position i lines up with position i.
+  """
+  def days_by_card(user_id) do
+    user_id
+    |> reviews_with_time()
+    |> Enum.group_by(
+      fn {card_id, _rating, _elapsed, _day} -> card_id end,
+      fn {_card_id, _rating, _elapsed, day} -> day end
+    )
+  end
+
+  @doc "A user's sequences, weighted by how recent each review is."
+  def recency_weighted(sequences, user_id) do
+    ExFsrs.Optimizer.Data.apply_recency_weights(sequences, days_by_card(user_id))
+  end
+
   @doc "A user's reviews as optimizer sequences."
   def sequences(user_id) do
     user_id |> reviews() |> ExFsrs.Optimizer.Data.build_sequences_from_elapsed()

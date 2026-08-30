@@ -64,6 +64,7 @@ if Code.ensure_loaded?(Nx) do
         :elapsed,
         :labels,
         :scored,
+        :weights,
         :valid,
         :stability0,
         :difficulty0,
@@ -127,6 +128,7 @@ if Code.ensure_loaded?(Nx) do
         elapsed: rows |> Enum.map(& &1.elapsed) |> Nx.tensor(type: :s64),
         labels: rows |> Enum.map(& &1.labels) |> Nx.tensor(type: :f64),
         scored: rows |> Enum.map(& &1.scored) |> Nx.tensor(type: :f64),
+        weights: rows |> Enum.map(& &1.weights) |> Nx.tensor(type: :f64),
         valid: rows |> Enum.map(& &1.valid) |> Nx.tensor(type: :f64),
         stability0: stability0,
         difficulty0: difficulty0,
@@ -150,6 +152,7 @@ if Code.ensure_loaded?(Nx) do
         scored:
           Enum.map(reviews, &if(&1.counts_for_loss?, do: 1.0, else: 0.0)) ++
             List.duplicate(0.0, padding),
+        weights: Enum.map(reviews, & &1.weight) ++ List.duplicate(1.0, padding),
         valid: List.duplicate(1.0, length(reviews)) ++ List.duplicate(0.0, padding)
       }
     end
@@ -233,6 +236,7 @@ if Code.ensure_loaded?(Nx) do
       elapsed = bucket.elapsed[[.., t]]
       valid = bucket.valid[[.., t]]
       scored = bucket.scored[[.., t]]
+      weight = bucket.weights[[.., t]]
       label = bucket.labels[[.., t]]
 
       retrievability = retrievability(params, stability, elapsed)
@@ -252,7 +256,11 @@ if Code.ensure_loaded?(Nx) do
       total =
         Nx.add(
           total,
-          Nx.sum(Nx.multiply(Loss.binary_cross_entropy(safe_retrievability, label), scored))
+          Nx.sum(
+            Loss.binary_cross_entropy(safe_retrievability, label)
+            |> Nx.multiply(scored)
+            |> Nx.multiply(weight)
+          )
         )
 
       first? = Nx.equal(has_state, 0)
