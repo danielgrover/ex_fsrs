@@ -36,6 +36,7 @@ if Code.ensure_loaded?(Nx) do
     alias ExFsrs.Optimizer.Data
     alias ExFsrs.Optimizer.Initialization
     alias ExFsrs.Optimizer.Loss
+    alias ExFsrs.Optimizer.Metrics
     alias ExFsrs.Optimizer.Model
     alias ExFsrs.Optimizer.Model.Batched
     alias ExFsrs.Optimizer.Model.Loop
@@ -153,6 +154,63 @@ if Code.ensure_loaded?(Nx) do
       else
         train(sequences, num_reviews, opts)
       end
+    end
+
+    @doc """
+    Per-review predictions, for scoring with `ExFsrs.Optimizer.Metrics`.
+
+    Replays each card at the given parameters and returns one
+    `{prediction, outcome, delta_t, review_index, lapses}` tuple per scored
+    review — what RMSE(bins) needs to group by.
+    """
+    def predictions(logs_or_sequences, parameters) when is_list(parameters) do
+      predictions(logs_or_sequences, Nx.tensor(parameters, type: :f64))
+    end
+
+    def predictions(logs_or_sequences, %Nx.Tensor{} = params) do
+      logs_or_sequences
+      |> to_sequences()
+      |> Enum.flat_map(fn {_card_id, reviews} -> card_predictions(params, reviews) end)
+    end
+
+    defp card_predictions(params, reviews) do
+      {rows, _state, _lapses} =
+        reviews
+        |> Enum.with_index(1)
+        |> Enum.reduce({[], nil, 0}, fn {review, index}, {rows, state, lapses} ->
+          rows =
+            if review.counts_for_loss? do
+              {stability, _difficulty} = state
+
+              prediction =
+                Nx.to_number(Model.retrievability(params, stability, review.elapsed_days))
+
+              [{prediction, review.label, review.elapsed_days, index, lapses} | rows]
+            else
+              rows
+            end
+
+          # A lapse only counts once the card has left same-day learning, which
+          # is the same condition that makes a review scoreable.
+          lapses = lapses + if(review.counts_for_loss? and review.rating == 1, do: 1, else: 0)
+
+          {rows, Model.step(params, state, review.rating, review.elapsed_days), lapses}
+        end)
+
+      Enum.reverse(rows)
+    end
+
+    @doc """
+    RMSE(bins) and log loss at the given parameters, as `srs-benchmark` reports.
+    """
+    def evaluate(logs_or_sequences, parameters) do
+      observations = predictions(logs_or_sequences, parameters)
+
+      %{
+        rmse_bins: Metrics.rmse_bins(observations),
+        log_loss: Metrics.log_loss(observations),
+        reviews: Enum.count(observations)
+      }
     end
 
     @doc """
