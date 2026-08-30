@@ -40,15 +40,22 @@ fixed_orders = fn sequences ->
   orders
 end
 
-# Every upgrade, plus a gamma sweep, under the split that matters.
+# The two configurations worth resolving against the baseline: the one with the
+# best mean in the earlier sweep, and the one that won on the most collections.
 variants = [
   {"py-fsrs", []},
-  {"+init", [initialize: true]},
-  {"L2 γ1", [regularization: 1.0]},
-  {"init+L2γ1", [initialize: true, regularization: 1.0]},
   {"init+L2γ2", [initialize: true, regularization: 2.0]},
   {"init+L2+rec", [initialize: true, regularization: 1.0, recency: true]}
 ]
+
+# Runtime scales with scored reviews, and a handful of very large collections
+# would otherwise dominate the wall clock while contributing one data point each
+# — the same weight as a collection a fiftieth their size.
+max_train_scored =
+  case System.get_env("MAX_TRAIN_SCORED") do
+    nil -> 25_000
+    value -> String.to_integer(value)
+  end
 
 scored_count = fn sequences ->
   Enum.reduce(sequences, 0, fn {_id, reviews}, total ->
@@ -72,7 +79,7 @@ rows =
     train_scored = Data.num_reviews(train)
     test_scored = scored_count.(test)
 
-    if train_scored < 512 or test_scored < 50 do
+    if train_scored < 512 or test_scored < 50 or train_scored > max_train_scored do
       []
     else
       weighted = AnkiDataset.recency_weighted(train, id)
