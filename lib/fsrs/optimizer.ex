@@ -237,6 +237,14 @@ if Code.ensure_loaded?(Nx) do
         # Nx.clip/3 takes scalar bounds; these are per-parameter.
         params = Nx.min(Nx.max(params, lower), upper)
 
+        # Keep the parameters on the default backend. A compiler hands back
+        # device-backed tensors, and Adam — plain Nx outside defn — passes that
+        # backend on to the parameters. Everything downstream that is not
+        # compiled then dispatches op by op to the device: batch_loss walks
+        # 12,580 reviews as individual scalar operations and goes from 0.5s to
+        # 53s. These are 21 floats.
+        params = Nx.backend_copy(params, Nx.BinaryBackend)
+
         on_step.(%{
           step: step,
           loss: Nx.to_number(loss),
