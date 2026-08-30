@@ -254,10 +254,23 @@ rating and fitting a forgetting curve to what actually happened — which is wha
 ExFsrs.Optimizer.compute_optimal_parameters(logs, initialize: true)
 ```
 
-Measured on held-out cards across 23 real collections (`bench/holdout_eval.exs`),
-it lowered mean loss by **2.2%** and won on 16 of 23, with a median per-collection
-gain of 0.0009 and a best of 0.028 (Wilcoxon p = 0.002). It is off by default
-because it deliberately departs from the py-fsrs behaviour the parity tests pin.
+How much it helps depends entirely on how you measure, and the difference is
+worth understanding before trusting either number:
+
+| | card holdout | temporal |
+|---|---|---|
+| mean loss change | **-2.220%** | -0.516% |
+| collections improved | 16/23 | 11/23 |
+| Wilcoxon p | **0.002** | **0.89** |
+
+Held-out *cards* say initialization is a clear win. Held-out *future* says it is
+a coin flip. The temporal result is the one to believe: a scheduler's job is
+predicting the future, and `srs-benchmark` splits the same way. Fitting `w[0..3]`
+on a collection's past apparently describes that past better than it describes
+what comes next.
+
+It is off by default, both because it departs from the py-fsrs behaviour the
+parity tests pin and because its benefit does not survive temporal evaluation.
 
 ### L2 regularization
 
@@ -266,16 +279,21 @@ weights training started from, as `fsrs-optimizer` and `fsrs-rs` do. The
 implementation is verified against fsrs-rs's own unit test for it, matching its
 expected penalty and gradients to f32 precision.
 
-Whether it *helps* is still unresolved. On held-out cards across 23 collections
-it won 14 of 23, which sounds encouraging, but the mean effect is **-0.014%** —
-frequent tiny wins offset by rarer larger losses — and neither a sign test
-(p = 0.40) nor a Wilcoxon signed-rank test (p = 0.62) can distinguish it from
-noise. There is no detectable relationship between its benefit and how thin the
-training data is (Spearman -0.29, p = 0.18), which is where it should help most.
+Like initialization, the answer depends on the split — in the opposite
+direction:
 
-It is off by default and offered as reference behaviour, not a recommendation.
-For comparison, initialization over the same 23 collections gives Wilcoxon
-p = 0.002, so the method can detect an effect of that size when one is there.
+| | card holdout | temporal |
+|---|---|---|
+| mean loss change | +0.014% | **-1.333%** |
+| collections improved | 14/23 | 16/23 |
+| Wilcoxon p | 0.62 | 0.06 |
+
+On held-out cards L2 looks like noise. On held-out future it is the single
+largest effect measured, and the direction makes sense: regularization exists to
+stop a model fitting the past too closely, which is exactly what generalizing to
+the future needs. p = 0.06 is suggestive rather than settled.
+
+Off by default, but on temporal evidence it is the more promising of the two.
 
 Note that regularization can only be judged on held-out data: it trades training
 fit for generalization, so on the data it trained on it always looks worse.

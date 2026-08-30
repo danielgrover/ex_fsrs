@@ -13,10 +13,14 @@ alias ExFsrs.Optimizer.Data
 
 base = [model: :loop, compiler: EXLA]
 
+# Every upgrade, plus a gamma sweep, under the split that matters.
 variants = [
   {"py-fsrs", []},
   {"+init", [initialize: true]},
-  {"+init+L2", [initialize: true, regularization: 1.0]}
+  {"L2 γ1", [regularization: 1.0]},
+  {"init+L2γ1", [initialize: true, regularization: 1.0]},
+  {"init+L2γ2", [initialize: true, regularization: 2.0]},
+  {"init+L2+rec", [initialize: true, regularization: 1.0, recency: true]}
 ]
 
 scored_count = fn sequences ->
@@ -44,9 +48,13 @@ rows =
     if train_scored < 512 or test_scored < 50 do
       []
     else
+      weighted = AnkiDataset.recency_weighted(train, id)
+
       losses =
         Enum.map(variants, fn {_name, opts} ->
-          parameters = Optimizer.compute_optimal_parameters(train, opts ++ base)
+          {recency, opts} = Keyword.pop(opts, :recency, false)
+          set = if recency, do: weighted, else: train
+          parameters = Optimizer.compute_optimal_parameters(set, opts ++ base)
           Optimizer.batch_loss(test, parameters)
         end)
 
@@ -82,7 +90,25 @@ for {{name, _opts}, mean} <- Enum.zip(variants, means) do
   IO.puts("  #{String.pad_trailing(name, 10)} #{Float.round(mean, 6)}   best on #{wins}/#{count}")
 end
 
-[plain, init, l2] = means
-IO.puts("\ninit vs py-fsrs: #{Float.round((plain - init) / plain * 100, 3)}%")
-IO.puts("L2 vs init:      #{Float.round((init - l2) / init * 100, 3)}%  (positive = better)")
-IO.puts("L2 beat init on #{Enum.count(rows, fn [_p, i, l] -> l < i end)}/#{count}")
+[plain, init, l2_only, l2, l2g2, rec] = means
+
+IO.puts("\nrelative to py-fsrs (positive = better):")
+IO.puts("  +init            #{Float.round((plain - init) / plain * 100, 3)}%")
+IO.puts("  L2 alone         #{Float.round((plain - l2_only) / plain * 100, 3)}%")
+IO.puts("  init+L2 γ=1      #{Float.round((plain - l2) / plain * 100, 3)}%")
+IO.puts("  init+L2 γ=2      #{Float.round((plain - l2g2) / plain * 100, 3)}%")
+IO.puts("  init+L2+recency  #{Float.round((plain - rec) / plain * 100, 3)}%")
+
+IO.puts("\nhead-to-head win counts:")
+
+IO.puts(
+  "  L2 γ=1 beat init alone on #{Enum.count(rows, fn r -> Enum.at(r, 3) < Enum.at(r, 1) end)}/#{count}"
+)
+
+IO.puts(
+  "  γ=2 beat γ=1 on           #{Enum.count(rows, fn r -> Enum.at(r, 4) < Enum.at(r, 3) end)}/#{count}"
+)
+
+IO.puts(
+  "  recency beat no recency on #{Enum.count(rows, fn r -> Enum.at(r, 5) < Enum.at(r, 3) end)}/#{count}"
+)
