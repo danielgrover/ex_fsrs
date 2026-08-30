@@ -27,3 +27,7 @@ ex_fsrs-*.tar
 
 # Claude Code project instructions.
 CLAUDE.md
+
+# Anki Revlogs 10K data. Gated and separately licensed; fetch with
+# bench/fetch_anki_revlogs.py rather than committing it.
+/test/fixtures/anki/

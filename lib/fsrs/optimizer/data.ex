@@ -70,16 +70,47 @@ if Code.ensure_loaded?(Nx) do
             previous -> DateTime.diff(datetime, previous, :day)
           end
 
-        review = %Review{
-          rating: rating,
-          elapsed_days: elapsed_days,
-          label: if(rating == 1, do: 0.0, else: 1.0),
-          counts_for_loss?: elapsed_days > 0
-        }
-
-        {review, datetime}
+        {review(rating, elapsed_days), datetime}
       end)
       |> elem(0)
+    end
+
+    defp review(rating, elapsed_days) do
+      %Review{
+        rating: rating,
+        elapsed_days: elapsed_days,
+        label: if(rating == 1, do: 0.0, else: 1.0),
+        counts_for_loss?: elapsed_days > 0
+      }
+    end
+
+    @doc """
+    Builds training sequences from reviews whose elapsed time is already known.
+
+    Some sources record the gap since a card's previous review rather than an
+    absolute timestamp. The Anki revlogs dataset is one, and its `elapsed_days`
+    field is exactly what a `Review` needs, so nothing has to be reconstructed
+    from synthesized datetimes.
+
+    Takes `{card_id, rating, elapsed_days}` tuples, already in chronological
+    order per card, with `-1` marking a card's first review. Cards come back
+    ordered by ascending `card_id`, matching `build_sequences/1`.
+    """
+    def build_sequences_from_elapsed(reviews) do
+      reviews
+      |> Enum.group_by(
+        fn {card_id, _rating, _elapsed} -> card_id end,
+        fn {_card_id, rating, elapsed} -> {rating_number(rating), elapsed} end
+      )
+      |> Enum.sort_by(fn {card_id, _reviews} -> card_id end)
+      |> Enum.map(fn {card_id, card_reviews} ->
+        reviews =
+          card_reviews
+          |> Enum.take(@max_seq_len)
+          |> Enum.map(fn {rating, elapsed_days} -> review(rating, elapsed_days) end)
+
+        {card_id, reviews}
+      end)
     end
 
     @doc """

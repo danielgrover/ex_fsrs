@@ -97,8 +97,10 @@ if Code.ensure_loaded?(Nx) do
     Computes optimized parameters from review logs.
 
     Accepts `%ExFsrs.ReviewLog{}` structs, `{card_id, rating, review_datetime}`
-    tuples, or any enumerable of either. Returns a list of 21 floats suitable
-    for `ExFsrs.Scheduler.new/1`.
+    tuples, any enumerable of either, or sequences already built by
+    `ExFsrs.Optimizer.Data.build_sequences/1` or
+    `ExFsrs.Optimizer.Data.build_sequences_from_elapsed/1`. Returns a list of 21
+    floats suitable for `ExFsrs.Scheduler.new/1`.
 
     Returns the default parameters unchanged when there is too little data —
     fewer than #{@mini_batch_size} reviews that follow an earlier review of the
@@ -125,7 +127,7 @@ if Code.ensure_loaded?(Nx) do
         executable is reused across many minibatches.
     """
     def compute_optimal_parameters(logs, opts \\ []) do
-      sequences = Data.build_sequences(logs)
+      sequences = to_sequences(logs)
       num_reviews = Data.num_reviews(sequences)
 
       if num_reviews < @mini_batch_size do
