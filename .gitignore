@@ -36,3 +36,6 @@ CLAUDE.md
 .env
 .env.*
 !.env.example
+
+# Cached dataset listing
+/test/fixtures/anki/.listing.json

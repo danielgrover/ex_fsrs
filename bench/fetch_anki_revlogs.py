@@ -22,8 +22,10 @@ https://huggingface.co/settings/tokens.
 
 import argparse
 import io
+import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -46,21 +48,42 @@ def token():
     return value
 
 
-def get(url, auth, with_headers=False):
+def get(url, auth, with_headers=False, attempts=5):
+    """Fetch a URL, retrying transient failures.
+
+    Listing the dataset walks 20 pages and a full fetch pulls dozens of files,
+    so a single dropped connection should not discard the whole run — which is
+    what it used to do.
+    """
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {auth}"})
-    try:
-        with urllib.request.urlopen(request) as response:
-            body = response.read()
-            return (body, response.headers) if with_headers else body
-    except urllib.error.HTTPError as error:
-        if error.code in (401, 403):
-            sys.exit(
-                f"{error.code} from {url}\n\n"
-                "The token was rejected. Confirm you accepted the dataset terms at\n"
-                f"  https://huggingface.co/datasets/{DATASET}\n"
-                "while logged in as the account that owns this token."
-            )
-        raise
+
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                body = response.read()
+                return (body, response.headers) if with_headers else body
+        except urllib.error.HTTPError as error:
+            if error.code in (401, 403):
+                sys.exit(
+                    f"{error.code} from {url}\n\n"
+                    "The token was rejected. Confirm you accepted the dataset terms at\n"
+                    f"  https://huggingface.co/datasets/{DATASET}\n"
+                    "while logged in as the account that owns this token."
+                )
+            # 5xx and rate limits are worth retrying; other 4xx are not.
+            if error.code < 500 and error.code != 429:
+                raise
+            transient = error
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
+            transient = error
+
+        if attempt == attempts:
+            sys.exit(f"giving up on {url} after {attempts} attempts: {transient}")
+
+        delay = 2 ** attempt
+        print(f"\n  {type(transient).__name__}, retrying in {delay}s ({attempt}/{attempts})",
+              flush=True)
+        time.sleep(delay)
 
 
 def next_page(headers):
@@ -76,13 +99,21 @@ def next_page(headers):
     return None
 
 
+CACHE = os.path.join(os.path.dirname(__file__), "..", "test", "fixtures", "anki", ".listing.json")
+
+
 def revlog_files(auth):
     """Every user's revlog path with its size, smallest first.
 
     The tree is listed recursively, which interleaves directories with files and
-    pages at 1000 entries, so every page has to be walked.
+    pages at 1000 entries, so every page has to be walked. The result is cached
+    because it takes 20 requests and the dataset is static.
     """
-    import json
+    cache = os.path.abspath(CACHE)
+
+    if os.path.exists(cache):
+        with open(cache) as f:
+            return [tuple(entry) for entry in json.load(f)]
 
     url = f"{API}/tree/main/revlogs?recursive=true"
     files = []
@@ -104,7 +135,13 @@ def revlog_files(auth):
 
     print()
 
-    return sorted(files, key=lambda pair: pair[1])
+    files = sorted(files, key=lambda pair: pair[1])
+    os.makedirs(os.path.dirname(cache), exist_ok=True)
+
+    with open(cache, "w") as f:
+        json.dump(files, f)
+
+    return files
 
 
 def user_id_of(path):
@@ -156,6 +193,30 @@ def main():
         help="stop considering users at this rank (default: all of them)",
     )
     parser.add_argument(
+        "--min-bytes",
+        type=int,
+        help="skip collections smaller than this. Roughly 35 scored reviews per "
+        "KiB, and under ~512 scored the optimizer returns the defaults, so very "
+        "small collections cannot be trained on at all.",
+    )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="leave already-downloaded collections alone",
+    )
+    parser.add_argument(
+        "--max-bytes",
+        type=int,
+        help="skip collections whose parquet is larger than this. Runtime scales "
+        "with review count, and the largest collections take minutes per "
+        "training run rather than seconds.",
+    )
+    parser.add_argument(
+        "--report",
+        action="store_true",
+        help="print the size distribution and exit without downloading",
+    )
+    parser.add_argument(
         "--spread",
         action="store_true",
         help="pick users evenly spaced across the considered range rather than "
@@ -174,6 +235,31 @@ def main():
     else:
         print("listing users by size...")
         ranked = revlog_files(auth)
+
+        if args.report:
+            print("\nsize distribution by rank:")
+            for pct in (0, 10, 25, 50, 60, 70, 80, 90, 95, 99, 100):
+                i = min(int(len(ranked) * pct / 100), len(ranked) - 1)
+                print(f"  p{pct:<3} rank {i:>5}  {ranked[i][1] / 1024:>9.0f} KiB")
+            return
+
+        if args.max_bytes or args.min_bytes:
+            low = args.min_bytes or 0
+            high = args.max_bytes or float("inf")
+            ranked = [(p, sz) for p, sz in ranked if low <= sz <= high]
+            print(f"  {len(ranked)} collections in "
+                  f"{low / 1024:.0f}-{high / 1024:.0f} KiB")
+
+        if args.skip_existing:
+            have = {
+                int(name[len("user_"):-len(".csv")])
+                for name in os.listdir(out_dir)
+                if name.startswith("user_") and name.endswith(".csv")
+            }
+            before = len(ranked)
+            ranked = [(p, sz) for p, sz in ranked if user_id_of(p) not in have]
+            print(f"  skipping {before - len(ranked)} already downloaded")
+
         until = args.until if args.until is not None else len(ranked)
         window = ranked[args.skip : until]
 
