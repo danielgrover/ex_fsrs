@@ -130,25 +130,33 @@ for {{name, _opts}, mean} <- Enum.zip(variants, means) do
   IO.puts("  #{String.pad_trailing(name, 10)} #{Float.round(mean, 6)}   best on #{wins}/#{count}")
 end
 
-[plain, init, l2_only, l2, l2g2, rec] = means
+[plain, l2g2, rec] = means
+
+# Three aggregations, because they answer different questions and disagree. The
+# ratio of totals is dominated by the collections with the largest losses; the
+# mean of per-collection ratios weights every collection equally and is pulled
+# by a few big winners; the median says what a typical collection gets.
+ratios = fn index ->
+  Enum.map(rows, fn row ->
+    (Enum.at(row, 0) - Enum.at(row, index)) / Enum.at(row, 0) * 100
+  end)
+end
+
+report = fn name, index, mean ->
+  values = ratios.(index)
+  sorted = Enum.sort(values)
+  median = Enum.at(sorted, div(length(sorted), 2))
+  improved = Enum.count(values, &(&1 > 0))
+
+  IO.puts(
+    "  #{String.pad_trailing(name, 16)} " <>
+      "total #{Float.round((plain - mean) / plain * 100, 3)}%   " <>
+      "per-collection mean #{Float.round(Enum.sum(values) / length(values), 3)}%   " <>
+      "median #{Float.round(median, 3)}%   " <>
+      "improved #{improved}/#{count}"
+  )
+end
 
 IO.puts("\nrelative to py-fsrs (positive = better):")
-IO.puts("  +init            #{Float.round((plain - init) / plain * 100, 3)}%")
-IO.puts("  L2 alone         #{Float.round((plain - l2_only) / plain * 100, 3)}%")
-IO.puts("  init+L2 γ=1      #{Float.round((plain - l2) / plain * 100, 3)}%")
-IO.puts("  init+L2 γ=2      #{Float.round((plain - l2g2) / plain * 100, 3)}%")
-IO.puts("  init+L2+recency  #{Float.round((plain - rec) / plain * 100, 3)}%")
-
-IO.puts("\nhead-to-head win counts:")
-
-IO.puts(
-  "  L2 γ=1 beat init alone on #{Enum.count(rows, fn r -> Enum.at(r, 3) < Enum.at(r, 1) end)}/#{count}"
-)
-
-IO.puts(
-  "  γ=2 beat γ=1 on           #{Enum.count(rows, fn r -> Enum.at(r, 4) < Enum.at(r, 3) end)}/#{count}"
-)
-
-IO.puts(
-  "  recency beat no recency on #{Enum.count(rows, fn r -> Enum.at(r, 5) < Enum.at(r, 3) end)}/#{count}"
-)
+report.("init+L2 γ=2", 1, l2g2)
+report.("init+L2+recency", 2, rec)

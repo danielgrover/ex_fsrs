@@ -250,39 +250,48 @@ default because each departs from the py-fsrs behaviour the parity tests pin:
 ```elixir
 ExFsrs.Optimizer.compute_optimal_parameters(logs,
   initialize: true,      # fit w[0..3] from data instead of starting at defaults
-  regularization: 1.0    # L2 pull toward the starting weights
+  regularization: 2.0    # L2 pull toward the starting weights
 )
 
 # recency weighting is applied to the data rather than passed as an option
 weighted = ExFsrs.Optimizer.Data.apply_recency_weights(sequences, days_by_card)
 ```
 
-Measured across 23 real collections from the Anki Revlogs 10K dataset, trained
-on each collection's past and scored on its future (`bench/temporal_eval.exs`),
-with the per-epoch card shuffle pinned so every variant sees identical
-conditions:
+Measured across **83 real collections** from the Anki Revlogs 10K dataset, each
+trained on its own past and scored on its own future
+(`bench/temporal_eval.exs`), with the per-epoch card shuffle pinned so every
+variant sees identical conditions:
 
-| variant | mean loss vs py-fsrs | collections improved | Wilcoxon p |
-|---|---|---|---|
-| `initialize` | +0.26% | 10/23 | 0.92 |
-| `regularization` alone | +0.67% | 12/23 | 0.78 |
-| both, γ=1 | +1.04% | 13/23 | 0.60 |
-| both, γ=2 | +1.32% | 14/23 | 0.29 |
-| both + recency | +0.85% | 14/23 | 0.34 |
+| variant | total loss | per-collection mean | median | improved | Wilcoxon p |
+|---|---|---|---|---|---|
+| `initialize` + `regularization: 2.0` | +1.76% | +4.33% | +0.63% | 49/83 | **0.004** |
+| the same, plus recency weighting | +2.03% | +4.85% | +1.03% | 56/83 | **0.0008** |
 
-**Every upgrade helps on average, and none of it is statistically significant.**
-A Friedman test across all six configurations gives p = 0.68. The means are
-ordered the way `fsrs-optimizer`'s design implies — each addition helping a
-little, and stacking — which is mildly reassuring, but nothing here can be
-claimed individually at this sample size.
+Recency weighting is worth adding on top: it beats the same configuration
+without it on 54 of 83 collections (p = 0.012). A Friedman test across the three
+configurations gives p = 0.0006.
 
-The obstacle is that per-collection effects are wildly inconsistent. For the
-best variant the improvement ranges from **+40.8% to -11.7%**, median +0.2%: a
-few atypical collections gain enormously and most gain nothing. Detecting a mean
-effect against that spread needs roughly **70-100 collections**, against the 23
-measured here.
+Three aggregations are quoted because they disagree and each answers a different
+question. **Total loss** is dominated by the collections with the largest losses.
+**Per-collection mean** weights every collection equally and is pulled upward by
+a few large winners — the best collection improves by 73%, the worst regresses
+by 25%. **Median** is what a typical collection gets, and it is about 1%.
 
-Two cautions worth carrying, both learned the hard way:
+The effect depends strongly on collection size:
+
+| training reviews | collections | effect |
+|---|---|---|
+| under 2,000 | 7 | +0.4% |
+| 2,000-4,000 | 26 | **+7.4%** |
+| 4,000-8,000 | 37 | +4.8% |
+| over 8,000 | 13 | +2.3% |
+
+Both ends have little to gain, for opposite reasons: below a couple of thousand
+reviews there is not enough signal to fit anything better, and above eight
+thousand plain py-fsrs optimization already has enough data to find good
+parameters on its own. The upgrades earn their keep in the middle.
+
+Two cautions worth carrying, both learned the hard way here:
 
 * **Score held-out future, not held-out cards.** A card holdout rated
   initialization at +2.2% (p = 0.002) and regularization at noise. Splitting the
@@ -291,7 +300,9 @@ Two cautions worth carrying, both learned the hard way:
 * **Pin the shuffle.** The per-epoch card shuffle alone moves held-out loss by a
   median of 2% run to run — as much as the largest difference between any two
   variants. `bench/noise_floor.exs` measures it; any comparison that does not
-  control for it is reading noise.
+  control for it is reading noise. An earlier 23-collection run found nothing
+  significant, and it took both fixes plus 60 more collections to resolve
+  effects this size.
 
 ### What the loss numbers do not say
 
