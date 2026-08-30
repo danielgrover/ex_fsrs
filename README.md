@@ -9,7 +9,7 @@
 
 [![Elixir](https://img.shields.io/badge/Lang-Elixir-purple.svg)](https://elixir-lang.org/)
 
-A spaced repetition scheduling library in Elixir implementing the FSRS-6 algorithm. Computes optimal review intervals for flashcards based on card difficulty, stability, and user feedback. Supports optional interval fuzzing to avoid predictable review dates. Zero external dependencies.
+A spaced repetition scheduling library in Elixir implementing the FSRS-6 algorithm. Computes optimal review intervals for flashcards based on card difficulty, stability, and user feedback. Supports optional interval fuzzing to avoid predictable review dates. Scheduling has zero required dependencies; the optional parameter optimizer needs [Nx](https://hex.pm/packages/nx).
 
 ## Table of Contents
 
@@ -20,6 +20,7 @@ A spaced repetition scheduling library in Elixir implementing the FSRS-6 algorit
   - [ExFsrs](#exfsrs)
   - [Scheduler](#scheduler)
   - [ReviewLog](#reviewlog)
+  - [Optimizer](#optimizer)
 - [Testing](#testing)
 - [Examples](#examples)
 - [Contributing](#contributing)
@@ -36,6 +37,7 @@ Key features:
 - **Adaptive scheduling** based on a card's difficulty, stability, and prior performance.
 - **Fuzzing (optional)** to randomize intervals, preventing overly predictable schedules.
 - **Learning, Review, Relearning states** with dedicated logic for each phase.
+- **Parameter optimization (optional)** — train the 21 weights on your own review history.
 - **Rescheduling** — replay review logs through a new scheduler with different parameters.
 - **Serialization** — cards and review logs convert to/from maps for storage.
 
@@ -52,6 +54,20 @@ def deps do
   ]
 end
 ```
+
+Scheduling needs nothing else. To use `ExFsrs.Optimizer`, also add Nx — it is an
+optional dependency, so it is not installed unless you ask for it:
+
+```elixir
+def deps do
+  [
+    {:ex_fsrs, "~> 0.2.0", git: "https://github.com/danielgrover/ex_fsrs"},
+    {:nx, "~> 0.13"}
+  ]
+end
+```
+
+Without Nx, `ExFsrs.Optimizer` and its submodules are simply not compiled.
 
 Then fetch and compile:
 
@@ -184,6 +200,55 @@ defmodule ExFsrs.ReviewLog do
   ]
 end
 ```
+
+### Optimizer
+
+Trains the 21 model weights on your own review history. Requires the optional
+`:nx` dependency.
+
+```elixir
+# Accepts %ExFsrs.ReviewLog{} structs or {card_id, rating, review_datetime}
+# tuples -- the tuple form avoids building a card struct per row when loading
+# a large history out of storage.
+parameters = ExFsrs.Optimizer.compute_optimal_parameters(review_logs)
+
+scheduler = ExFsrs.Scheduler.new(parameters: parameters)
+```
+
+Returns the default parameters unchanged if there is too little data (fewer
+than 512 reviews that follow an earlier review of the same card by at least a
+day). `ExFsrs.Optimizer.batch_loss/2` scores a parameter set against a
+collection, which is the cheapest way to confirm the optimized weights actually
+beat the defaults on your data.
+
+Expect roughly 50 seconds for a 12,500-review collection (measured on an Apple
+M2, Nx's default `BinaryBackend`); py-fsrs does the same run in 19s. Cost grows
+a little faster than linearly with review count.
+
+Cards in a minibatch are advanced together as tensors rather than one review at
+a time, which is ~2.9x faster than the scalar formulation. Both are kept: pass
+`model: :scalar` for the reference implementation, which the test suite diffs
+the batched one against.
+
+A third model, `model: :loop`, expresses the timestep loop as a `defn` `while`
+so the expression graph stays a fixed size, which makes it compilable:
+
+```elixir
+ExFsrs.Optimizer.compute_optimal_parameters(logs, model: :loop, compiler: EXLA)
+```
+
+That runs the reference collection in ~25s. It requires `:exla` and an Nx that
+computes f64 gradients through `while` correctly — released versions do not, and
+fail silently rather than raising, so `model: :loop` checks at startup and
+refuses to run otherwise. See `bench/NX_WHILE_GRAD_F64.md`.
+
+This is a port of py-fsrs's optimizer and is verified against a recorded run of
+it (see `test/fixtures/`). Note that `fsrs-optimizer` and `fsrs-rs` — the latter
+being what Anki ships — do more: they fit the initial-stability weights from
+data before training, add an L2 penalty toward the starting weights, weight
+samples by recency, and remove outlier intervals. None of that is implemented
+here, so these weights will be somewhat less accurate than Anki's, especially
+on small collections.
 
 ---
 
