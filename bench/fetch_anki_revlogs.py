@@ -46,11 +46,12 @@ def token():
     return value
 
 
-def get(url, auth):
+def get(url, auth, with_headers=False):
     request = urllib.request.Request(url, headers={"Authorization": f"Bearer {auth}"})
     try:
         with urllib.request.urlopen(request) as response:
-            return response.read()
+            body = response.read()
+            return (body, response.headers) if with_headers else body
     except urllib.error.HTTPError as error:
         if error.code in (401, 403):
             sys.exit(
@@ -62,16 +63,46 @@ def get(url, auth):
         raise
 
 
+def next_page(headers):
+    """The API pages at 1000 entries and points at the next with a Link header."""
+    link = headers.get("Link") or headers.get("link")
+    if not link:
+        return None
+
+    for part in link.split(","):
+        if 'rel="next"' in part:
+            return part.split(";")[0].strip().strip("<>")
+
+    return None
+
+
 def revlog_files(auth):
-    """Every user's revlog path with its size, smallest first."""
+    """Every user's revlog path with its size, smallest first.
+
+    The tree is listed recursively, which interleaves directories with files and
+    pages at 1000 entries, so every page has to be walked.
+    """
     import json
 
-    tree = json.loads(get(f"{API}/tree/main/revlogs?recursive=true", auth))
-    files = [
-        (entry["path"], entry.get("size") or entry.get("lfs", {}).get("size") or 0)
-        for entry in tree
-        if entry["type"] == "file" and entry["path"].endswith(".parquet")
-    ]
+    url = f"{API}/tree/main/revlogs?recursive=true"
+    files = []
+    pages = 0
+
+    while url:
+        body, headers = get(url, auth, with_headers=True)
+        pages += 1
+
+        for entry in json.loads(body):
+            if entry.get("type") != "file" or not entry["path"].endswith(".parquet"):
+                continue
+
+            size = entry.get("size") or (entry.get("lfs") or {}).get("size") or 0
+            files.append((entry["path"], size))
+
+        url = next_page(headers)
+        print(f"\r  {pages} pages, {len(files)} files", end="", flush=True)
+
+    print()
 
     return sorted(files, key=lambda pair: pair[1])
 
@@ -107,7 +138,15 @@ def write_user(path, auth, out_dir):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--users", type=int, default=3, help="how many users to fetch, smallest first")
+    parser.add_argument("--users", type=int, default=3, help="how many users to fetch")
+    parser.add_argument(
+        "--skip",
+        type=int,
+        default=0,
+        help="skip this many of the smallest users first. The smallest collections "
+        "have too few scored reviews to train at all (the optimizer returns the "
+        "defaults under 512), so skip ahead for something that exercises training.",
+    )
     parser.add_argument("--user-ids", help="comma-separated user ids, overriding --users")
     args = parser.parse_args()
 
@@ -120,7 +159,8 @@ def main():
         paths = [f"revlogs/user_id={u}/data.parquet" for u in wanted]
     else:
         print("listing users by size...")
-        paths = [path for path, _size in revlog_files(auth)[: args.users]]
+        ranked = revlog_files(auth)
+        paths = [path for path, _size in ranked[args.skip : args.skip + args.users]]
 
     total = sum(write_user(path, auth, out_dir) for path in paths)
     print(f"\n{len(paths)} users, {total} reviews -> {out_dir}")
