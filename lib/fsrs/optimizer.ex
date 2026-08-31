@@ -17,19 +17,32 @@ if Code.ensure_loaded?(Nx) do
 
     ## Scope
 
-    This reproduces py-fsrs, which starts from the default parameters and runs
-    plain Adam on binary cross-entropy.
+    Called with no options this reproduces py-fsrs exactly: start from the
+    default parameters and run plain Adam on binary cross-entropy.
 
-    `:initialize` adds the first of `fsrs-optimizer`'s upgrades: fitting
-    `w[0..3]` from the data rather than starting them at the defaults. It is off
-    by default, since it departs from the behaviour the parity tests pin.
+    `:initialize`, `:regularization` and `:recency` add `fsrs-optimizer`'s and
+    `fsrs-rs`'s refinements. Together they lowered held-out loss by 2% across 83
+    real collections (p = 0.0008); each is off by default because each departs
+    from the py-fsrs behaviour the parity tests pin:
 
-    `:regularization` adds the second: an L2 penalty toward the weights training
-    started from. It is verified against fsrs-rs's own test for it, but its
-    benefit is unproven on the collections measured here — see the README.
+        ExFsrs.Optimizer.compute_optimal_parameters(logs,
+          initialize: true,
+          regularization: 1.0,
+          recency: true
+        )
 
-    Still missing from `fsrs-optimizer` and `fsrs-rs` (what Anki ships): recency
-    weighting of samples, and outlier removal.
+    `ExFsrs.Optimizer.Data.remove_outliers/1` implements the fourth refinement,
+    but measurement says not to use it — see the README.
+
+    ## Fitting it into an application
+
+    Persist what `ExFsrs.Scheduler.review_card/5` returns; a `{card_id, rating,
+    reviewed_at}` row per review is all this needs. Run per user, in the
+    background — a 12,500-review collection takes about 50 seconds. Score the
+    result against the current parameters with `batch_loss/2` and keep the
+    better one rather than adopting blindly. New parameters do not move existing
+    due dates; `ExFsrs.Scheduler.reschedule_card/3` will if you want them moved.
+    The README works this through.
     """
 
     alias ExFsrs.Optimizer.Adam
@@ -132,6 +145,10 @@ if Code.ensure_loaded?(Nx) do
         together with `:initialize`, which makes the anchor a measurement rather
         than a generic default.
 
+      * `:recency` — weight recent reviews more heavily, as `fsrs-rs` does.
+        Only applies when logs carry timestamps; sequences built without them
+        cannot be ranked. Off by default.
+
       * `:initialize` — fit `w[0..3]` from the data before training instead of
         starting them at the defaults, as `fsrs-optimizer` and `fsrs-rs` do.
         Defaults to `false`, which keeps py-fsrs's behaviour.
@@ -146,7 +163,7 @@ if Code.ensure_loaded?(Nx) do
         executable is reused across many minibatches.
     """
     def compute_optimal_parameters(logs, opts \\ []) do
-      sequences = to_sequences(logs)
+      sequences = to_sequences(logs, recency: Keyword.get(opts, :recency, false))
       num_reviews = Data.num_reviews(sequences)
 
       if num_reviews < @mini_batch_size do
@@ -246,9 +263,9 @@ if Code.ensure_loaded?(Nx) do
 
     # Already-built sequences pass straight through, so callers scoring several
     # parameter sets against one collection do not rebuild them each time.
-    defp to_sequences([{_card_id, [%Data.Review{} | _]} | _] = sequences), do: sequences
-
-    defp to_sequences(logs), do: Data.build_sequences(logs)
+    defp to_sequences(logs, opts \\ [])
+    defp to_sequences([{_card_id, [%Data.Review{} | _]} | _] = sequences, _opts), do: sequences
+    defp to_sequences(logs, opts), do: Data.build_sequences(logs, opts)
 
     defp train(sequences, num_reviews, opts) do
       t_max = ceil(num_reviews / @mini_batch_size) * @num_epochs

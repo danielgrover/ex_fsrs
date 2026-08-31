@@ -242,6 +242,84 @@ computes f64 gradients through `while` correctly — released versions do not, a
 fail silently rather than raising, so `model: :loop` checks at startup and
 refuses to run otherwise. See `bench/NX_WHILE_GRAD_F64.md`.
 
+### Using it in an app
+
+The scheduler is stateless and the optimizer is a batch job, so integration is
+mostly about deciding *when* to run it and *whether to keep* what it produces.
+
+**1. Keep the review logs.** `review_card/4` already returns one per review;
+persist it. The optimizer needs a card id, a rating and a timestamp — nothing
+else — so a table of `{card_id, rating, reviewed_at}` is enough, and can be the
+same rows you would keep for a review history UI.
+
+**2. Run it in the background, per user.** A collection of 12,500 reviews takes
+~50 seconds (~25s with `model: :loop` and EXLA). That is a job, not a request.
+Parameters are personal, so one run per user — or per deck preset, if your app
+groups material the way Anki does.
+
+**3. Only run it when there is enough history.** Below 512 scoreable reviews the
+optimizer returns the defaults unchanged, so there is no point scheduling a job
+until a user is past that. Re-run periodically after: habits, material and
+settings drift, and the parameters go stale with them.
+
+```elixir
+def optimize(user) do
+  logs = Repo.all(from r in Review, where: r.user_id == ^user.id, order_by: r.reviewed_at)
+  tuples = Enum.map(logs, &{&1.card_id, &1.rating, &1.reviewed_at})
+
+  current = user.fsrs_parameters || ExFsrs.Scheduler.new().parameters
+
+  candidate =
+    ExFsrs.Optimizer.compute_optimal_parameters(tuples,
+      initialize: true,
+      regularization: 1.0,
+      recency: true
+    )
+
+  # Never adopt blindly: score both on this user's own history and keep the
+  # better one. A collection can be unusual enough that training makes it worse.
+  if ExFsrs.Optimizer.batch_loss(tuples, candidate) <
+       ExFsrs.Optimizer.batch_loss(tuples, current) do
+    {:ok, candidate}
+  else
+    :keep_current
+  end
+end
+```
+
+Those three options are the configuration measured best below. Plain
+`compute_optimal_parameters(tuples)` reproduces py-fsrs exactly if you would
+rather match the reference implementation than the best result.
+
+**4. Decide what happens to cards already scheduled.** New parameters do not
+change existing due dates — those were computed under the old ones. Two choices:
+
+* *Let it settle.* Cards pick up the new parameters at their next review. No
+  disruption, and the collection converges over a few weeks.
+* *Reschedule.* `ExFsrs.Scheduler.reschedule_card/3` replays a card's review
+  logs through the new scheduler as if it had always been in use:
+
+  ```elixir
+  scheduler = ExFsrs.Scheduler.new(parameters: candidate)
+  card = ExFsrs.Scheduler.reschedule_card(scheduler, card, logs_for_that_card)
+  ```
+
+  This can move a due date by a lot — see the interval table below — so it is
+  worth doing deliberately rather than automatically.
+
+**5. Watch what it did.** `ExFsrs.Optimizer.evaluate/2` reports RMSE(bins) and
+log loss using `srs-benchmark`'s definitions, which is what to log if you want
+to know whether optimization is earning its keep across your users:
+
+```elixir
+ExFsrs.Optimizer.evaluate(tuples, candidate)
+#=> %{rmse_bins: 0.0557, log_loss: 0.3655, reviews: 1425}
+```
+
+Most users will see very little change, and that is expected — the defaults are
+themselves the result of optimizing across ~20,000 collections. The value is
+concentrated in users whose habits are unusual.
+
 ### The upgrades, and what they are worth
 
 Three of `fsrs-optimizer`/`fsrs-rs`'s refinements are implemented, each off by
@@ -250,12 +328,13 @@ default because each departs from the py-fsrs behaviour the parity tests pin:
 ```elixir
 ExFsrs.Optimizer.compute_optimal_parameters(logs,
   initialize: true,      # fit w[0..3] from data instead of starting at defaults
-  regularization: 2.0    # L2 pull toward the starting weights
+  regularization: 1.0,   # L2 pull toward the starting weights
+  recency: true          # weight recent reviews more heavily
 )
-
-# recency weighting is applied to the data rather than passed as an option
-weighted = ExFsrs.Optimizer.Data.apply_recency_weights(sequences, days_by_card)
 ```
+
+`recency: true` needs logs that carry timestamps, which is the normal input
+form; sequences built from elapsed days alone cannot be ranked in time.
 
 Measured across **83 real collections** from the Anki Revlogs 10K dataset, each
 trained on its own past and scored on its own future

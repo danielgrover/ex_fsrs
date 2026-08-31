@@ -40,13 +40,35 @@ if Code.ensure_loaded?(Nx) do
     tuples, or any enumerable of either. Returns
     `[{card_id, [%Review{}]}]` ordered by ascending `card_id`.
     """
-    def build_sequences(logs) do
+    def build_sequences(logs, opts \\ []) do
+      sequences =
+        logs
+        |> Enum.map(&normalize/1)
+        |> Enum.group_by(fn {card_id, _rating, _datetime} -> card_id end)
+        |> Enum.sort_by(fn {card_id, _reviews} -> card_id end)
+        |> Enum.map(fn {card_id, reviews} ->
+          {card_id, to_sequence(reviews)}
+        end)
+
+      if Keyword.get(opts, :recency, false) do
+        apply_recency_weights(sequences, days_from_logs(logs))
+      else
+        sequences
+      end
+    end
+
+    # Recency ranking needs when each review happened. `build_sequences/1`
+    # already has that — it is given absolute datetimes and reduces them to gaps
+    # — so the ordering is recovered here rather than asked of the caller.
+    defp days_from_logs(logs) do
       logs
       |> Enum.map(&normalize/1)
-      |> Enum.group_by(fn {card_id, _rating, _datetime} -> card_id end)
-      |> Enum.sort_by(fn {card_id, _reviews} -> card_id end)
-      |> Enum.map(fn {card_id, reviews} ->
-        {card_id, to_sequence(reviews)}
+      |> Enum.group_by(
+        fn {card_id, _rating, _datetime} -> card_id end,
+        fn {_card_id, _rating, datetime} -> datetime end
+      )
+      |> Map.new(fn {card_id, datetimes} ->
+        {card_id, datetimes |> Enum.sort(DateTime) |> Enum.take(@max_seq_len)}
       end)
     end
 
@@ -129,9 +151,10 @@ if Code.ensure_loaded?(Nx) do
     `0.25 + 0.75 * (rank / (n - 1))^3`. The cube keeps most of the collection
     near the floor and lets only the tail carry full weight.
 
-    `days` maps each card id to the day offsets of its reviews, in the same
-    order as that card's reviews in `sequences`. Ranking is over scored reviews
-    only, since unscored ones contribute nothing to weight.
+    `days` maps each card id to when its reviews happened, in the same order as
+    that card's reviews in `sequences`. Any orderable value works — a day offset
+    or a `DateTime` — since only the ranking matters. Ranking is over scored
+    reviews only, as unscored ones contribute nothing.
     """
     def apply_recency_weights(sequences, days) do
       ranked =
