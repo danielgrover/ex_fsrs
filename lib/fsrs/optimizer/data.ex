@@ -166,6 +166,14 @@ if Code.ensure_loaded?(Nx) do
     @doc """
     Stops scoring reviews that sit in outlier intervals, as `fsrs-optimizer` does.
 
+    > #### Measured harmful {: .warning}
+    >
+    > Across 83 collections this turned a significant 2% improvement into a
+    > non-significant 0.8% one, and lost head to head on 48 of 83. It hurts most
+    > on collections of 2,000-8,000 reviews, which is where the other upgrades
+    > help most. See the README. It is implemented for completeness rather than
+    > because it is recommended.
+
     A collection accumulates reviews that say more about the user's life than
     their memory: the card they came back to after a year away, or an interval
     that only two cards ever had. Fitting a forgetting curve through those

@@ -291,6 +291,42 @@ reviews there is not enough signal to fit anything better, and above eight
 thousand plain py-fsrs optimization already has enough data to find good
 parameters on its own. The upgrades earn their keep in the middle.
 
+### Outlier removal, which does not help
+
+`fsrs-optimizer`'s fourth refinement drops reviews sitting in sparse or
+implausibly long interval buckets. It is implemented
+(`ExFsrs.Optimizer.Data.remove_outliers/1`) and measured, and on this evidence
+it should not be used:
+
+| variant | vs py-fsrs | improved | Wilcoxon p |
+|---|---|---|---|
+| initialize + L2 + recency | +2.03% | 56/83 | **0.0008** |
+| the same, plus outlier removal | +0.79% | 44/83 | 0.39 |
+
+Adding it turns a significant 2% gain into a non-significant 0.8% one. Compared
+head to head it is 1.26% *worse* and wins on only 35 of 83 collections
+(p = 0.054), with a worst case of -114%.
+
+The damage tracks how much data a collection can spare:
+
+| training reviews | collections | effect of removing outliers |
+|---|---|---|
+| under 2,000 | 7 | +0.1% |
+| 2,000-4,000 | 26 | **-4.5%** |
+| 4,000-8,000 | 37 | **-4.7%** |
+| over 8,000 | 13 | +1.7% |
+
+It hurts most in exactly the band where the other upgrades help most, and helps
+slightly only where there is data to spare. On these collections it discards a
+median of 18% of scored reviews — far more than its nominal 5% budget, because
+past that budget every bucket with fewer than 6 reviews is dropped.
+
+One caveat on why it may be harsher here than upstream: `fsrs-optimizer` expands
+each card into one row per history prefix, so a bucket holds many more rows than
+the single observation per card that this representation gives it. The same
+"fewer than 6" threshold therefore removes more here. The port is faithful to
+the algorithm; the data it is applied to is shaped differently.
+
 Two cautions worth carrying, both learned the hard way here:
 
 * **Score held-out future, not held-out cards.** A card holdout rated
