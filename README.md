@@ -307,6 +307,29 @@ change existing due dates — those were computed under the old ones. Two choice
   This can move a due date by a lot — see the interval table below — so it is
   worth doing deliberately rather than automatically.
 
+**Burying, suspending, and other app-layer state.** A buried card is a scheduled
+card — it has a due date computed under the old parameters — so it falls under
+the decision above like any other. Beyond that, none of it needs modelling here.
+`%ExFsrs{}` holds `state`, `step`, `stability`, `difficulty`, `due` and
+`last_review`; burying and suspending are queue decisions your app makes, and
+the scheduler never asks.
+
+They do not distort the algorithm either. Both the scheduler and the optimizer
+measure elapsed time from `last_review` to the review that actually happened,
+never from `due`, so a card reviewed late — buried repeatedly, a holiday, a
+month away — is simply a review with a longer gap. Handling those correctly is
+what the forgetting curve is for.
+
+The one trap is at the boundary: **do not write a review log for a bury or a
+suspend.** They are not reviews, and feeding them to the optimizer as though
+they carried a rating would teach it from events that never tested anyone's
+memory. Log what `review_card/5` returns and nothing else.
+
+Worth knowing that long absences interact with outlier removal, which drops
+intervals over 100 days. A user returning after a summer produces exactly that
+shape, and those reviews are real evidence about long-term retention — one more
+reason the measurements below come out against using it.
+
 **5. Watch what it did.** `ExFsrs.Optimizer.evaluate/2` reports RMSE(bins) and
 log loss using `srs-benchmark`'s definitions, which is what to log if you want
 to know whether optimization is earning its keep across your users:
