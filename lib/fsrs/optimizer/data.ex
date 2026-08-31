@@ -164,6 +164,109 @@ if Code.ensure_loaded?(Nx) do
     end
 
     @doc """
+    Stops scoring reviews that sit in outlier intervals, as `fsrs-optimizer` does.
+
+    A collection accumulates reviews that say more about the user's life than
+    their memory: the card they came back to after a year away, or an interval
+    that only two cards ever had. Fitting a forgetting curve through those
+    drags the parameters toward explaining noise.
+
+    Reviews are grouped by the card's first rating and by elapsed days. Buckets
+    are then considered sparsest-first, longest-interval-first, and dropped:
+
+      * unconditionally, while fewer than `max(5% of reviews, 20)` have been
+        dropped so far;
+      * after that budget is spent, only if the bucket is genuinely thin (fewer
+        than 6 reviews) or the interval is implausibly long — over 100 days, or
+        over 365 for cards first rated Easy, which legitimately get long ones.
+
+    Note the sharp edge, inherited from `fsrs-optimizer`: past the budget the
+    "fewer than 6" rule applies to every remaining bucket, so a collection whose
+    intervals are *all* thinly populated loses all of them. Real collections
+    repeat common intervals hundreds of times and are unaffected, but callers
+    should check `num_reviews/1` afterwards rather than assume survival — the
+    optimizer returns the default parameters below its training threshold, so
+    this degrades rather than failing.
+
+    Dropped reviews stay in the sequence and still advance the
+    card's state; they simply stop contributing to the loss, which is what
+    `fsrs-optimizer` does by dropping the training row while leaving the card's
+    history intact.
+
+    `fsrs-optimizer` also has `remove_non_continuous_rows`, which truncates a
+    card at the first gap in its review index. That has no analogue here:
+    sequences are built contiguously from a card's own reviews, so there are no
+    gaps to find.
+    """
+    def remove_outliers(sequences) do
+      scored =
+        for {card_id, reviews} <- sequences,
+            {review, index} <- Enum.with_index(reviews),
+            review.counts_for_loss?,
+            do: {first_rating(reviews), review.elapsed_days, card_id, index}
+
+      dropped = buckets_to_drop(scored)
+
+      Enum.map(sequences, fn {card_id, reviews} ->
+        first = first_rating(reviews)
+
+        reviews =
+          Enum.map(reviews, fn review ->
+            if review.counts_for_loss? and
+                 MapSet.member?(dropped, {first, review.elapsed_days}) do
+              %{review | counts_for_loss?: false}
+            else
+              review
+            end
+          end)
+
+        {card_id, reviews}
+      end)
+    end
+
+    defp first_rating([%Review{rating: rating} | _rest]), do: rating
+    defp first_rating([]), do: 0
+
+    defp buckets_to_drop(scored) do
+      total = Enum.count(scored)
+      budget = max(total * 0.05, 20)
+
+      scored
+      |> Enum.group_by(fn {rating, _delta_t, _id, _i} -> rating end)
+      |> Enum.flat_map(fn {rating, rating_scored} ->
+        drop_for_rating(rating, rating_scored, budget)
+      end)
+      |> MapSet.new()
+    end
+
+    defp drop_for_rating(rating, rating_scored, budget) do
+      # Sparsest first; among equally sparse, the longest interval first.
+      counts =
+        rating_scored
+        |> Enum.frequencies_by(fn {_rating, delta_t, _id, _i} -> delta_t end)
+        |> Enum.sort_by(fn {delta_t, count} -> {count, -delta_t} end)
+
+      # Cards first rated Easy legitimately reach much longer intervals.
+      limit = if rating == 4, do: 365, else: 100
+
+      {dropped, _removed} =
+        Enum.reduce(counts, {[], 0}, fn {delta_t, count}, {dropped, removed} ->
+          cond do
+            removed + count < budget ->
+              {[{rating, delta_t} | dropped], removed + count}
+
+            count < 6 or delta_t > limit ->
+              {[{rating, delta_t} | dropped], removed + count}
+
+            true ->
+              {dropped, removed}
+          end
+        end)
+
+      dropped
+    end
+
+    @doc """
     Counts the reviews that contribute to the loss.
 
     py-fsrs uses this both to decide whether there is enough data to train at

@@ -44,8 +44,8 @@ end
 # best mean in the earlier sweep, and the one that won on the most collections.
 variants = [
   {"py-fsrs", []},
-  {"init+L2γ2", [initialize: true, regularization: 2.0]},
-  {"init+L2+rec", [initialize: true, regularization: 1.0, recency: true]}
+  {"best", [initialize: true, regularization: 1.0, recency: true]},
+  {"best+outliers", [initialize: true, regularization: 1.0, recency: true, outliers: true]}
 ]
 
 # Runtime scales with scored reviews, and a handful of very large collections
@@ -82,12 +82,15 @@ rows =
     if train_scored < 512 or test_scored < 50 or train_scored > max_train_scored do
       []
     else
-      weighted = AnkiDataset.recency_weighted(train, id)
-
       losses =
         Enum.map(variants, fn {_name, opts} ->
           {recency, opts} = Keyword.pop(opts, :recency, false)
-          set = if recency, do: weighted, else: train
+          {outliers, opts} = Keyword.pop(opts, :outliers, false)
+
+          # Outliers are removed before weighting, so the recency ranking runs
+          # over the reviews that will actually be scored.
+          set = if outliers, do: Data.remove_outliers(train), else: train
+          set = if recency, do: AnkiDataset.recency_weighted(set, id), else: set
 
           parameters =
             Optimizer.compute_optimal_parameters(
@@ -158,5 +161,5 @@ report = fn name, index, mean ->
 end
 
 IO.puts("\nrelative to py-fsrs (positive = better):")
-report.("init+L2 γ=2", 1, l2g2)
-report.("init+L2+recency", 2, rec)
+report.("best", 1, l2g2)
+report.("best+outliers", 2, rec)
