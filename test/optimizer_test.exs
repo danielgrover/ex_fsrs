@@ -137,7 +137,7 @@ defmodule ExFsrs.OptimizerTest do
         {1, :good, ~U[2024-01-05 09:00:00Z]}
       ]
 
-      assert [{_p1, 0.0, 2, 2, 0}, {_p2, 1.0, 2, 3, 1}] =
+      assert [{_p1, +0.0, 2, 2, 0}, {_p2, 1.0, 2, 3, 1}] =
                Optimizer.predictions(logs, ExFsrs.Scheduler.new().parameters)
     end
 

@@ -26,7 +26,7 @@ defmodule ExFsrs.Optimizer.DataTest do
 
       assert %Data.Review{rating: 3, elapsed_days: -1, counts_for_loss?: false} = first
       assert %Data.Review{rating: 1, elapsed_days: 0, counts_for_loss?: false} = same_day
-      assert %Data.Review{rating: 1, elapsed_days: 4, label: 0.0, counts_for_loss?: true} = lapse
+      assert %Data.Review{rating: 1, elapsed_days: 4, label: +0.0, counts_for_loss?: true} = lapse
       assert %Data.Review{rating: 4, elapsed_days: 7, label: 1.0, counts_for_loss?: true} = easy
     end
 
