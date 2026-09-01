@@ -250,7 +250,7 @@ if Code.ensure_loaded?(Nx) do
         logs_or_sequences
         |> to_sequences()
         |> Enum.reduce({Nx.tensor(0.0, type: :f64), 0}, fn {_card_id, reviews}, {total, count} ->
-          {loss, _state, scored} = replay(params, reviews, nil)
+          {loss, _state, scored} = replay(params, reviews, nil, :unweighted)
           {Nx.add(total, loss), count + scored}
         end)
 
@@ -270,25 +270,7 @@ if Code.ensure_loaded?(Nx) do
     defp train(sequences, num_reviews, opts) do
       t_max = ceil(num_reviews / @mini_batch_size) * @num_epochs
 
-      params =
-        sequences
-        |> starting_parameters(Keyword.get(opts, :initialize, false))
-        |> Nx.tensor(type: :f64)
-
-      # The L2 anchor is where training started, so it is captured before the
-      # first step and never updated.
-      regularization = {params, Keyword.get(opts, :regularization, 0.0), num_reviews}
-
-      adam = Adam.new(21, learning_rate: @learning_rate, t_max: t_max)
-
-      card_orders = Keyword.get(opts, :card_orders)
-      lower = Nx.tensor(@lower_bounds, type: :f64)
-      upper = Nx.tensor(@upper_bounds, type: :f64)
-
-      on_step = Keyword.get(opts, :on_step, fn _ -> :ok end)
       model = Keyword.get(opts, :model, :batched)
-
-      compiler = Keyword.get(opts, :compiler)
 
       if model == :loop and not Loop.supported?() do
         raise ArgumentError, """
@@ -303,6 +285,25 @@ if Code.ensure_loaded?(Nx) do
         """
       end
 
+      params =
+        sequences
+        |> starting_parameters(Keyword.get(opts, :initialize, false))
+        |> Nx.tensor(type: :f64)
+
+      config = %{
+        model: model,
+        compiler: Keyword.get(opts, :compiler),
+        lower: Nx.tensor(@lower_bounds, type: :f64),
+        upper: Nx.tensor(@upper_bounds, type: :f64),
+        on_step: Keyword.get(opts, :on_step, fn _ -> :ok end),
+        # The L2 anchor is where training started, so it is captured before the
+        # first step and never updated.
+        regularization: {params, Keyword.get(opts, :regularization, 0.0), num_reviews}
+      }
+
+      adam = Adam.new(21, learning_rate: @learning_rate, t_max: t_max)
+      card_orders = Keyword.get(opts, :card_orders)
+
       by_id = Map.new(sequences)
       card_ids = Enum.map(sequences, fn {card_id, _reviews} -> card_id end)
 
@@ -316,18 +317,7 @@ if Code.ensure_loaded?(Nx) do
 
           ordered = Enum.map(card_ids, fn card_id -> {card_id, Map.fetch!(by_id, card_id)} end)
 
-          {params, adam, step} =
-            run_epoch(
-              params,
-              adam,
-              ordered,
-              lower,
-              upper,
-              step,
-              on_step,
-              {model, compiler},
-              regularization
-            )
+          {params, adam, step} = run_epoch(params, adam, ordered, step, config)
 
           loss = batch_loss(sequences, params)
 
@@ -359,17 +349,9 @@ if Code.ensure_loaded?(Nx) do
 
     # One epoch: cut the ordered reviews into minibatches of @mini_batch_size
     # scored reviews and take a gradient step after each.
-    defp run_epoch(
-           params,
-           adam,
-           ordered,
-           lower,
-           upper,
-           step,
-           on_step,
-           {model, compiler},
-           regularization
-         ) do
+    defp run_epoch(params, adam, ordered, step, config) do
+      %{model: model, compiler: compiler} = config
+
       ordered
       |> chunk()
       |> Enum.reduce({params, adam, nil, step}, fn chunk, {params, adam, carry, step} ->
@@ -378,7 +360,7 @@ if Code.ensure_loaded?(Nx) do
         {loss, gradient} =
           model
           |> chunk_value_and_grad(params, prepared, compiler)
-          |> regularize(params, chunk, regularization)
+          |> regularize(params, chunk, config.regularization)
 
         # The state a card carries across a minibatch boundary is computed with
         # the parameters in force during that minibatch and then detached, as
@@ -388,7 +370,7 @@ if Code.ensure_loaded?(Nx) do
 
         {adam, params} = Adam.step(adam, params, gradient)
         # Nx.clip/3 takes scalar bounds; these are per-parameter.
-        params = Nx.min(Nx.max(params, lower), upper)
+        params = Nx.min(Nx.max(params, config.lower), config.upper)
 
         # Keep the parameters on the default backend. A compiler hands back
         # device-backed tensors, and Adam — plain Nx outside defn — passes that
@@ -398,7 +380,7 @@ if Code.ensure_loaded?(Nx) do
         # 53s. These are 21 floats.
         params = Nx.backend_copy(params, Nx.BinaryBackend)
 
-        on_step.(%{
+        config.on_step.(%{
           step: step,
           loss: Nx.to_number(loss),
           gradient: Nx.to_flat_list(gradient),
@@ -414,7 +396,8 @@ if Code.ensure_loaded?(Nx) do
     # started from, so a collection with thin evidence for some parameter cannot
     # drag it far. The penalty is quadratic, so its gradient is added in closed
     # form rather than traced.
-    defp regularize(result, _params, _chunk, {_initial, +0.0, _total}), do: result
+    defp regularize(result, _params, _chunk, {_initial, gamma, _total}) when gamma == 0,
+      do: result
 
     defp regularize({loss, gradient}, params, chunk, {initial, gamma, total_size}) do
       batch_size = scored_count(chunk)
@@ -469,20 +452,26 @@ if Code.ensure_loaded?(Nx) do
     defp chunk_loss(params, chunk, carry) do
       Enum.reduce(chunk, {Nx.tensor(0.0, type: :f64), carry}, fn segment, {total, carry} ->
         state = if segment.continues?, do: carry, else: nil
-        {loss, state, _scored} = replay(params, segment.reviews, state)
+        {loss, state, _scored} = replay(params, segment.reviews, state, :weighted)
         {Nx.add(total, loss), state}
       end)
     end
 
     # Replays a card's reviews, returning {summed_loss, end_state, scored_count}.
-    defp replay(params, reviews, state) do
+    #
+    # Training (`:weighted`) honours each review's weight, as the batched model
+    # does. Evaluation (`:unweighted`) does not: `batch_loss/2` reports the
+    # plain mean cross-entropy py-fsrs reports, whatever weights the sequences
+    # carry.
+    defp replay(params, reviews, state, weighting) do
       Enum.reduce(reviews, {Nx.tensor(0.0, type: :f64), state, 0}, fn review,
                                                                       {total, state, scored} ->
         {total, scored} =
           if review.counts_for_loss? do
             {stability, _difficulty} = state
             prediction = Model.retrievability(params, stability, review.elapsed_days)
-            {Nx.add(total, Loss.binary_cross_entropy(prediction, review.label)), scored + 1}
+            loss = Loss.binary_cross_entropy(prediction, review.label)
+            {Nx.add(total, weigh(loss, review.weight, weighting)), scored + 1}
           else
             {total, scored}
           end
@@ -490,6 +479,9 @@ if Code.ensure_loaded?(Nx) do
         {total, Model.step(params, state, review.rating, review.elapsed_days), scored}
       end)
     end
+
+    defp weigh(loss, _weight, :unweighted), do: loss
+    defp weigh(loss, weight, :weighted), do: Nx.multiply(loss, weight)
 
     @doc """
     The minibatches of one epoch, as lists of segments.

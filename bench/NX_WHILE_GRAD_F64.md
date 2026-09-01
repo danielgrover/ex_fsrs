@@ -199,3 +199,21 @@ makes EXLA unusable for this workload. `while` would make the graph a fixed size
 
 Forward-pass agreement is already confirmed: the `defn`/`while` model matches a
 scalar reference implementation to 8.5e-14. Only the gradient is affected.
+
+## Status in this repository
+
+The fix (an 18-line change to `nx/lib/nx/defn/grad.ex`, with tests) lives on a
+local Nx checkout, branch `fix/while-grad-f64`, based on upstream `37901d7`. It
+is not yet upstream.
+
+`mix.exs` depends on stock hex Nx, which is all the optimizer's default
+`model: :batched` needs. `model: :loop` — used by the bench scripts for its
+~2x speed under EXLA — checks `ExFsrs.Optimizer.Model.Loop.supported?/0` at
+startup and refuses to run on an Nx without the fix. To use it, point
+`EX_FSRS_NX_PATH` at the patched checkout before fetching deps:
+
+    EX_FSRS_NX_PATH=../nx/nx mix deps.get
+    EX_FSRS_NX_PATH=../nx/nx MIX_ENV=test mix run bench/temporal_eval.exs
+
+The override leaves `mix.lock` alone (the hex `nx` entry stays), so switching
+back is just a plain `mix deps.get`.

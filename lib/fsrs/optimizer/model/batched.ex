@@ -9,11 +9,12 @@ if Code.ensure_loaded?(Nx) do
     traced expression graph by roughly the batch width, which is what dominates
     the runtime under `Nx`.
 
-    Semantics are unchanged — same per-review loss, same minibatch boundaries,
-    same three-way stability branch. Only the *order* in which the losses and
-    gradients are summed differs, which perturbs results by around 1e-15. The
-    optimizer propagates that noise linearly with a gain below 1, so final
-    parameters shift by about the same amount.
+    The math itself lives in `ExFsrs.Optimizer.Model`; this module only adds
+    padding, bucketing and masking. Semantics are unchanged — same per-review
+    loss, same minibatch boundaries, same three-way stability branch. Only the
+    *order* in which the losses and gradients are summed differs, which perturbs
+    results by around 1e-15. The optimizer propagates that noise linearly with a
+    gain below 1, so final parameters shift by about the same amount.
 
     ## Padding and branch safety
 
@@ -31,10 +32,7 @@ if Code.ensure_loaded?(Nx) do
     """
 
     alias ExFsrs.Optimizer.Loss
-
-    @stability_min 0.001
-    @min_difficulty 1.0
-    @max_difficulty 10.0
+    alias ExFsrs.Optimizer.Model
 
     # See ExFsrs.Optimizer.Model: bare float literals become f32 tensors.
     defp c(value), do: Nx.tensor(value, type: :f64)
@@ -219,27 +217,40 @@ if Code.ensure_loaded?(Nx) do
       end)
     end
 
-    # The bucket already carries its columns and initial state, so it is passed
-    # whole rather than unpacked into ten arguments.
     defp run_bucket(params, %Bucket{} = bucket) do
       initial = {c(0.0), bucket.stability0, bucket.difficulty0, bucket.has_state0}
 
-      Enum.reduce(0..(bucket.length - 1), initial, fn t,
-                                                      {total, stability, difficulty, has_state} ->
-        step(params, bucket, t, total, stability, difficulty, has_state)
-      end)
-      |> then(fn {total, stability, difficulty, _has_state} -> {total, stability, difficulty} end)
+      {total, stability, difficulty, _has_state} =
+        Enum.reduce(0..(bucket.length - 1), initial, fn t, state ->
+          step(params, bucket, t, state)
+        end)
+
+      {total, stability, difficulty}
     end
 
-    defp step(params, bucket, t, total, stability, difficulty, has_state) do
-      rating = bucket.ratings[[.., t]]
-      elapsed = bucket.elapsed[[.., t]]
-      valid = bucket.valid[[.., t]]
-      scored = bucket.scored[[.., t]]
-      weight = bucket.weights[[.., t]]
-      label = bucket.labels[[.., t]]
+    defp step(params, bucket, t, {total, stability, difficulty, has_state}) do
+      column = fn tensor -> tensor[[.., t]] end
 
-      retrievability = retrievability(params, stability, elapsed)
+      {total, stability, difficulty, has_state} =
+        step_columns(
+          params,
+          {column.(bucket.ratings), column.(bucket.elapsed), column.(bucket.labels),
+           column.(bucket.scored), column.(bucket.weights), column.(bucket.valid)},
+          {total, stability, difficulty, has_state}
+        )
+
+      {total, stability, difficulty, has_state}
+    end
+
+    @doc false
+    # Advances one timestep for a column of cards. Shared with the `while` form
+    # in `ExFsrs.Optimizer.Model.Loop`, which calls it from inside `defn`.
+    def step_columns(
+          params,
+          {rating, elapsed, label, scored, weight, valid},
+          {total, stability, difficulty, has_state}
+        ) do
+      retrievability = Model.retrievability(params, stability, elapsed)
 
       # Cross-entropy is evaluated on every lane and masked afterwards, but a
       # same-day or padding lane has elapsed == 0 and so a prediction of exactly
@@ -250,8 +261,7 @@ if Code.ensure_loaded?(Nx) do
       # finite in the lanes the mask discards. The unmasked retrievability is
       # still what feeds the stability branch below, which has no singularity
       # at elapsed == 0.
-      scored? = Nx.equal(scored, 1)
-      safe_retrievability = Nx.select(scored?, retrievability, c(0.5))
+      safe_retrievability = Nx.select(Nx.equal(scored, 1), retrievability, c(0.5))
 
       total =
         Nx.add(
@@ -269,114 +279,25 @@ if Code.ensure_loaded?(Nx) do
       next_stability =
         Nx.select(
           first?,
-          initial_stability(params, rating),
+          Model.initial_stability(params, rating),
           Nx.select(
             same_day?,
-            short_term_stability(params, stability, rating),
-            long_term_stability(params, difficulty, stability, retrievability, rating)
+            Model.short_term_stability(params, stability, rating),
+            Model.next_stability(params, difficulty, stability, retrievability, rating)
           )
         )
 
       next_difficulty =
         Nx.select(
           first?,
-          initial_difficulty(params, rating),
-          next_difficulty(params, difficulty, rating)
+          Model.initial_difficulty(params, rating),
+          Model.next_difficulty(params, difficulty, rating)
         )
 
       valid? = Nx.equal(valid, 1)
 
       {total, Nx.select(valid?, next_stability, stability),
        Nx.select(valid?, next_difficulty, difficulty), Nx.max(has_state, valid)}
-    end
-
-    defp retrievability(params, stability, elapsed) do
-      decay = Nx.negate(params[20])
-      factor = Nx.subtract(Nx.pow(c(0.9), Nx.divide(1, decay)), 1)
-      days = Nx.as_type(Nx.max(elapsed, 0), :f64)
-
-      Nx.pow(Nx.add(1, Nx.divide(Nx.multiply(factor, days), stability)), decay)
-    end
-
-    defp initial_stability(params, rating) do
-      Nx.max(Nx.take(params, Nx.subtract(rating, 1)), c(@stability_min))
-    end
-
-    defp initial_difficulty(params, rating) do
-      params
-      |> initial_difficulty_unclamped(Nx.as_type(rating, :f64))
-      |> Nx.clip(c(@min_difficulty), c(@max_difficulty))
-    end
-
-    defp initial_difficulty_unclamped(params, rating) do
-      Nx.add(Nx.subtract(params[4], Nx.exp(Nx.multiply(params[5], Nx.subtract(rating, 1)))), 1)
-    end
-
-    defp next_difficulty(params, difficulty, rating) do
-      rating = Nx.as_type(rating, :f64)
-      delta = Nx.negate(Nx.multiply(params[6], Nx.subtract(rating, 3)))
-      damped = Nx.divide(Nx.multiply(Nx.subtract(c(10.0), difficulty), delta), c(9.0))
-
-      arg1 = initial_difficulty_unclamped(params, c(4.0))
-      arg2 = Nx.add(difficulty, damped)
-
-      params[7]
-      |> Nx.multiply(arg1)
-      |> Nx.add(Nx.multiply(Nx.subtract(1, params[7]), arg2))
-      |> Nx.clip(c(@min_difficulty), c(@max_difficulty))
-    end
-
-    defp short_term_stability(params, stability, rating) do
-      rating_f = Nx.as_type(rating, :f64)
-
-      increase =
-        Nx.multiply(
-          Nx.exp(Nx.multiply(params[17], Nx.add(Nx.subtract(rating_f, 3), params[18]))),
-          Nx.pow(stability, Nx.negate(params[19]))
-        )
-
-      # A successful same-day review must never shrink stability.
-      increase =
-        Nx.select(Nx.not_equal(rating, 1), Nx.max(increase, c(1.0)), increase)
-
-      Nx.max(Nx.multiply(stability, increase), c(@stability_min))
-    end
-
-    defp long_term_stability(params, difficulty, stability, retrievability, rating) do
-      forget = forget_stability(params, difficulty, stability, retrievability)
-      recall = recall_stability(params, difficulty, stability, retrievability, rating)
-
-      Nx.max(Nx.select(Nx.equal(rating, 1), forget, recall), c(@stability_min))
-    end
-
-    defp forget_stability(params, difficulty, stability, retrievability) do
-      long_term =
-        params[11]
-        |> Nx.multiply(Nx.pow(difficulty, Nx.negate(params[12])))
-        |> Nx.multiply(Nx.subtract(Nx.pow(Nx.add(stability, 1), params[13]), 1))
-        |> Nx.multiply(Nx.exp(Nx.multiply(Nx.subtract(1, retrievability), params[14])))
-
-      short_term = Nx.divide(stability, Nx.exp(Nx.multiply(params[17], params[18])))
-
-      Nx.min(long_term, short_term)
-    end
-
-    defp recall_stability(params, difficulty, stability, retrievability, rating) do
-      hard_penalty = Nx.select(Nx.equal(rating, 2), params[15], c(1.0))
-      easy_bonus = Nx.select(Nx.equal(rating, 4), params[16], c(1.0))
-
-      increase =
-        params[8]
-        |> Nx.exp()
-        |> Nx.multiply(Nx.subtract(11, difficulty))
-        |> Nx.multiply(Nx.pow(stability, Nx.negate(params[9])))
-        |> Nx.multiply(
-          Nx.subtract(Nx.exp(Nx.multiply(Nx.subtract(1, retrievability), params[10])), 1)
-        )
-        |> Nx.multiply(hard_penalty)
-        |> Nx.multiply(easy_bonus)
-
-      Nx.multiply(stability, Nx.add(1, increase))
     end
   end
 end

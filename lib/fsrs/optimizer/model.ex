@@ -5,26 +5,31 @@ if Code.ensure_loaded?(Nx) do
 
     Mirrors the stability, difficulty and retrievability math of
     `ExFsrs.Scheduler`, expressed with `Nx` so that gradients flow back to the
-    21 model weights.
+    21 model weights. This is the single copy of that math on the optimizer
+    side: `ExFsrs.Optimizer.Model.Batched` and `ExFsrs.Optimizer.Model.Loop`
+    call these functions on whole columns of cards at once.
 
     Only a subset of the scheduler is reproduced here. In FSRS-6 the card state
     machine (`:learning`/`:review`/`:relearning`), the step index, due dates,
     intervals and fuzzing never influence stability, difficulty or
-    retrievability — see `ExFsrs.Scheduler.compute_stability_difficulty/4`,
-    which reads only stability, difficulty and days-since-last-review. That
+    retrievability — see `ExFsrs.Scheduler.review_card/5`, whose memory-state
+    update reads only stability, difficulty and days-since-last-review. That
     makes the trainable model a pure function of
     `{stability, difficulty, elapsed_days, rating}`.
 
-    Ratings are plain integers (1..4) and `elapsed_days` a plain integer, since
-    both are known before tracing; only the weights and the card state are
-    tensors.
+    `rating` and `elapsed_days` may be plain integers (one card) or integer
+    tensors (a column of cards); every function broadcasts. Where a scalar
+    rating lets a branch be skipped outright, a clause does so; the tensor
+    clause evaluates both branches and selects, since per-element branching is
+    not available.
 
     ## Kernel operators
 
     These functions run inside `Nx.Defn.value_and_grad/2` outside of `defn`,
     where `Kernel` operators are unavailable. Every arithmetic operation on a
     tensor must therefore go through an `Nx` function (`Nx.multiply/2`,
-    `Nx.negate/1`, ...) rather than `*` or `-`.
+    `Nx.negate/1`, ...) rather than `*` or `-`. That also makes them callable
+    from inside `defn` during tracing.
     """
 
     @stability_min 0.001
@@ -42,18 +47,18 @@ if Code.ensure_loaded?(Nx) do
 
     @doc "Forgetting-curve factor, `0.9^(1/decay) - 1`."
     def factor(params) do
-      d = decay(params)
-      Nx.subtract(Nx.pow(c(0.9), Nx.divide(1, d)), 1)
+      Nx.subtract(Nx.pow(c(0.9), Nx.divide(1, decay(params))), 1)
     end
 
     @doc """
     Predicted probability of recall after `elapsed_days` at the given stability.
 
     Both `decay` and `factor` derive from `w[20]`, which is itself trained, so
-    gradients flow through them too.
+    gradients flow through them too. Negative elapsed days (the `-1` that marks
+    a first review) are floored at 0.
     """
     def retrievability(params, stability, elapsed_days) do
-      elapsed = c(max(elapsed_days, 0) * 1.0)
+      elapsed = Nx.as_type(Nx.max(elapsed_days, 0), :f64)
 
       Nx.pow(
         Nx.add(1, Nx.divide(Nx.multiply(factor(params), elapsed), stability)),
@@ -63,7 +68,7 @@ if Code.ensure_loaded?(Nx) do
 
     @doc "Initial stability for a card's first review, `w[rating - 1]`."
     def initial_stability(params, rating) do
-      Nx.max(params[rating - 1], c(@stability_min))
+      Nx.max(Nx.take(params, Nx.subtract(rating, 1)), c(@stability_min))
     end
 
     @doc "Initial difficulty for a card's first review, clamped to 1.0..10.0."
@@ -74,52 +79,72 @@ if Code.ensure_loaded?(Nx) do
     end
 
     defp initial_difficulty_unclamped(params, rating) do
-      Nx.add(Nx.subtract(params[4], Nx.exp(Nx.multiply(params[5], rating - 1))), 1)
+      Nx.add(Nx.subtract(params[4], Nx.exp(Nx.multiply(params[5], Nx.subtract(rating, 1)))), 1)
     end
 
     @doc "Difficulty after a review, with linear damping and mean reversion."
     def next_difficulty(params, difficulty, rating) do
-      delta_difficulty = Nx.negate(Nx.multiply(params[6], rating - 3))
+      delta = Nx.negate(Nx.multiply(params[6], Nx.subtract(rating, 3)))
+      damped = Nx.divide(Nx.multiply(Nx.subtract(c(10.0), difficulty), delta), c(9.0))
 
-      damped =
-        Nx.divide(Nx.multiply(Nx.subtract(c(10.0), difficulty), delta_difficulty), c(9.0))
-
-      arg1 = initial_difficulty_unclamped(params, 4)
-      arg2 = Nx.add(difficulty, damped)
+      baseline = initial_difficulty_unclamped(params, 4)
+      reverted = Nx.add(difficulty, damped)
 
       params[7]
-      |> Nx.multiply(arg1)
-      |> Nx.add(Nx.multiply(Nx.subtract(1, params[7]), arg2))
+      |> Nx.multiply(baseline)
+      |> Nx.add(Nx.multiply(Nx.subtract(1, params[7]), reverted))
       |> Nx.clip(c(@min_difficulty), c(@max_difficulty))
     end
 
-    @doc "Stability after a same-day (< 1 day elapsed) review."
+    @doc """
+    Stability after a same-day (< 1 day elapsed) review.
+
+    A successful same-day review never shrinks stability; only Again can.
+    """
     def short_term_stability(params, stability, rating) do
       increase =
         Nx.multiply(
-          Nx.exp(Nx.multiply(params[17], Nx.add(rating - 3, params[18]))),
+          Nx.exp(Nx.multiply(params[17], Nx.add(Nx.subtract(rating, 3), params[18]))),
           Nx.pow(stability, Nx.negate(params[19]))
         )
 
-      # A successful same-day review must never shrink stability.
-      increase = if rating in [2, 3, 4], do: Nx.max(increase, c(1.0)), else: increase
+      increase = Nx.select(Nx.not_equal(rating, 1), Nx.max(increase, c(1.0)), increase)
 
       Nx.max(Nx.multiply(stability, increase), c(@stability_min))
     end
 
-    @doc "Stability after a review at least a day later."
-    def next_stability(params, difficulty, stability, retrievability, rating) do
-      next =
-        if rating == 1 do
-          next_forget_stability(params, difficulty, stability, retrievability)
-        else
-          next_recall_stability(params, difficulty, stability, retrievability, rating)
-        end
+    @doc """
+    Stability after a review at least a day later.
 
-      Nx.max(next, c(@stability_min))
+    With a scalar rating only the branch that applies is evaluated. With a
+    tensor rating both are evaluated for every element and selected between,
+    so both must stay finite on every input — see the padding notes in
+    `ExFsrs.Optimizer.Model.Batched`.
+    """
+    def next_stability(params, difficulty, stability, retrievability, rating)
+
+    def next_stability(params, difficulty, stability, retrievability, 1) do
+      Nx.max(forget_stability(params, difficulty, stability, retrievability), c(@stability_min))
     end
 
-    defp next_forget_stability(params, difficulty, stability, retrievability) do
+    def next_stability(params, difficulty, stability, retrievability, rating)
+        when is_integer(rating) do
+      Nx.max(
+        recall_stability(params, difficulty, stability, retrievability, rating),
+        c(@stability_min)
+      )
+    end
+
+    def next_stability(params, difficulty, stability, retrievability, rating) do
+      forget = forget_stability(params, difficulty, stability, retrievability)
+      recall = recall_stability(params, difficulty, stability, retrievability, rating)
+
+      Nx.max(Nx.select(Nx.equal(rating, 1), forget, recall), c(@stability_min))
+    end
+
+    # After a lapse, stability is the smaller of the long-term post-lapse
+    # formula and the short-term Again result, so a lapse never raises it.
+    defp forget_stability(params, difficulty, stability, retrievability) do
       long_term =
         params[11]
         |> Nx.multiply(Nx.pow(difficulty, Nx.negate(params[12])))
@@ -131,9 +156,9 @@ if Code.ensure_loaded?(Nx) do
       Nx.min(long_term, short_term)
     end
 
-    defp next_recall_stability(params, difficulty, stability, retrievability, rating) do
-      hard_penalty = if rating == 2, do: params[15], else: 1
-      easy_bonus = if rating == 4, do: params[16], else: 1
+    defp recall_stability(params, difficulty, stability, retrievability, rating) do
+      hard_penalty = Nx.select(Nx.equal(rating, 2), params[15], c(1.0))
+      easy_bonus = Nx.select(Nx.equal(rating, 4), params[16], c(1.0))
 
       increase =
         params[8]
@@ -150,10 +175,11 @@ if Code.ensure_loaded?(Nx) do
     end
 
     @doc """
-    Advances a card's `{stability, difficulty}` by one review.
+    Advances one card's `{stability, difficulty}` by one review.
 
     Pass `nil` as the state for a card's first review. Mirrors the three-way
-    branch in `ExFsrs.Scheduler.compute_stability_difficulty/4`.
+    branch in `ExFsrs.Scheduler`: first review, same-day review, or a review a
+    day or more later.
     """
     def step(params, state, rating, elapsed_days)
 

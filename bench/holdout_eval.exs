@@ -1,3 +1,9 @@
+# Needs an Nx carrying the `while` f64 gradient fix (bench/NX_WHILE_GRAD_F64.md):
+# this script trains with `model: :loop` for speed, and stock Nx computes wrong
+# gradients through `while`. Point EX_FSRS_NX_PATH at a patched checkout before
+# `mix deps.get`; on stock Nx the optimizer refuses `:loop` rather than train on
+# bad gradients, and the script stops with that error.
+#
 # Compares optimizer variants on held-out cards across every fetched collection.
 #
 # Regularization trades training fit for generalization, so it can only be

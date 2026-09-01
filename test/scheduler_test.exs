@@ -119,27 +119,29 @@ defmodule ExFsrs.SchedulerTest do
     end
   end
 
-  describe "review_card/5 with string state" do
-    test "handles card with string state value" do
+  describe "review_card/5 with a learning card that has no step" do
+    # py-fsrs treats a learning card with `step = None` as being at step 0.
+    test "starts at step 0 rather than graduating" do
       scheduler = ExFsrs.Scheduler.new(enable_fuzzing: false)
       now = DateTime.utc_now()
-
-      card = %ExFsrs{
-        card_id: 1,
-        state: "learning",
-        step: 0,
-        stability: nil,
-        difficulty: nil,
-        due: now,
-        last_review: nil
-      }
+      card = ExFsrs.new(state: :learning, step: nil)
 
       {updated_card, _log} = ExFsrs.Scheduler.review_card(scheduler, card, :good, now)
 
       assert updated_card.state == :learning
       assert updated_card.step == 1
-      assert updated_card.stability == 2.3065
-      assert_in_delta updated_card.difficulty, 2.118103970459016, 1.0e-9
+      assert DateTime.diff(updated_card.due, now, :minute) == 10
+    end
+  end
+
+  describe "review_card/5 with an invalid rating" do
+    test "raises rather than scheduling" do
+      scheduler = ExFsrs.Scheduler.new()
+      rating = String.to_atom("meh")
+
+      assert_raise FunctionClauseError, fn ->
+        ExFsrs.Scheduler.review_card(scheduler, ExFsrs.new(), rating)
+      end
     end
   end
 

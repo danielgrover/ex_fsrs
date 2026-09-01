@@ -74,8 +74,7 @@ defmodule ExFsrs.Optimizer.InitializationTest do
       # Raw means are 2/3 and 1/1; each is pulled toward 0.9 by one
       # pseudo-observation, so the sparser bucket moves further.
       assert_in_delta five, (2 / 3 * 3 + 0.9) / 4, 1.0e-12
-      assert_in_delta ten, (1.0 * 1 + 0.9) / 2, 1.0e-12
-      assert ten > 1.0 * 1 / 1 - 1.0e-9 or ten < 1.0
+      assert_in_delta ten, (1.0 + 0.9) / 2, 1.0e-12
     end
   end
 

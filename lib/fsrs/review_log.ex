@@ -1,40 +1,40 @@
 defmodule ExFsrs.ReviewLog do
   @moduledoc """
-  Review log functionality for FSRS.
+  A record of one review: the card as it was, the rating, and when.
 
-  This module handles the storage and retrieval of review history
-  for cards in the spaced repetition system.
+  `ExFsrs.Scheduler.review_card/5` returns one of these with every review.
+  Persisting them is what makes `ExFsrs.Scheduler.reschedule_card/3` and
+  `ExFsrs.Optimizer` possible, since both work from a card's history rather
+  than its current state.
+
+  The `card` field is the card *before* the review was applied. Only its
+  `card_id` is needed for rescheduling and optimizing; the rest is there so a
+  review can be inspected or undone.
+
+  `to_map/1` and `from_map/1` mirror `ExFsrs.to_map/1` and `ExFsrs.from_map/1`.
   """
 
-  alias ExFsrs
-
+  @typedoc "A review log."
   @type t :: %__MODULE__{
           card: ExFsrs.t(),
           rating: ExFsrs.rating(),
           review_datetime: DateTime.t(),
-          review_duration: integer() | nil
+          review_duration: non_neg_integer() | nil
         }
 
-  defstruct [
-    :card,
-    :rating,
-    :review_datetime,
-    :review_duration
-  ]
+  @ratings %{"again" => :again, "hard" => :hard, "good" => :good, "easy" => :easy}
+
+  defstruct [:card, :rating, :review_datetime, :review_duration]
 
   @doc """
-  Creates a new review log entry.
+  Builds a review log.
 
-  ## Parameters
-    - card: ExFsrs struct that was reviewed
-    - rating: Rating given to the card
-    - review_datetime: DateTime of the review
-    - review_duration: Duration of the review in milliseconds
-
-  ## Returns
-    - A new ReviewLog struct
+  `review_duration` is how long the review took in milliseconds, if known. The
+  scheduler never reads it.
   """
-  def new(card, rating, review_datetime \\ DateTime.utc_now(), review_duration \\ nil) do
+  @spec new(ExFsrs.t(), ExFsrs.rating(), DateTime.t(), non_neg_integer() | nil) :: t()
+  def new(%ExFsrs{} = card, rating, review_datetime \\ DateTime.utc_now(), review_duration \\ nil)
+      when rating in [:again, :hard, :good, :easy] do
     %__MODULE__{
       card: card,
       rating: rating,
@@ -43,15 +43,8 @@ defmodule ExFsrs.ReviewLog do
     }
   end
 
-  @doc """
-  Converts a review log to a map for storage.
-
-  ## Parameters
-    - log: ReviewLog struct to convert
-
-  ## Returns
-    - Map containing the review log data
-  """
+  @doc "Converts a review log to a string-keyed map for storage."
+  @spec to_map(t()) :: map()
   def to_map(%__MODULE__{} = log) do
     %{
       "card" => ExFsrs.to_map(log.card),
@@ -62,45 +55,30 @@ defmodule ExFsrs.ReviewLog do
   end
 
   @doc """
-  Creates a review log from a map.
+  Builds a review log from a map produced by `to_map/1`.
 
-  ## Parameters
-    - map: Map containing review log data
-
-  ## Returns
-    - ReviewLog struct
+  Keys may be strings or atoms. Raises `ArgumentError` on a missing card, an
+  unrecognised rating, or an unparseable datetime.
   """
-  def from_map(map) do
+  @spec from_map(map()) :: t()
+  def from_map(map) when is_map(map) do
     %__MODULE__{
-      card: parse_card(get_field(map, :card, "card")),
-      rating: parse_rating(get_field(map, :rating, "rating")),
-      review_datetime: parse_review_datetime(get_field(map, :review_datetime, "review_datetime")),
-      review_duration: get_field(map, :review_duration, "review_duration")
+      card: parse_card(ExFsrs.field(map, :card)),
+      rating: parse_rating(ExFsrs.field(map, :rating)),
+      review_datetime:
+        ExFsrs.parse_datetime!(ExFsrs.field(map, :review_datetime), "review_datetime"),
+      review_duration: ExFsrs.field(map, :review_duration)
     }
   end
 
-  defp get_field(map, atom_key, string_key) do
-    case Map.fetch(map, atom_key) do
-      {:ok, value} -> value
-      :error -> Map.get(map, string_key)
-    end
-  end
+  defp parse_card(%ExFsrs{} = card), do: card
+  defp parse_card(map) when is_map(map), do: ExFsrs.from_map(map)
+  defp parse_card(value), do: raise(ArgumentError, "invalid card: #{inspect(value)}")
 
-  defp parse_review_datetime(nil), do: DateTime.utc_now()
+  defp parse_rating(rating) when rating in [:again, :hard, :good, :easy], do: rating
 
-  defp parse_review_datetime(value) when is_binary(value) do
-    case DateTime.from_iso8601(value) do
-      {:ok, datetime, 0} -> datetime
-      _ -> raise "Invalid ISO8601 datetime format for review_datetime"
-    end
-  end
+  defp parse_rating(rating) when is_binary(rating) and is_map_key(@ratings, rating),
+    do: Map.fetch!(@ratings, rating)
 
-  defp parse_review_datetime(value), do: value
-
-  defp parse_rating(value) when is_atom(value), do: value
-  defp parse_rating(value) when is_binary(value), do: String.to_existing_atom(value)
-  defp parse_rating(_), do: :good
-
-  defp parse_card(nil), do: ExFsrs.new()
-  defp parse_card(data), do: ExFsrs.from_map(data)
+  defp parse_rating(rating), do: raise(ArgumentError, "invalid rating: #{inspect(rating)}")
 end

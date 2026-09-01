@@ -197,19 +197,24 @@ defmodule ExFsrs.Optimizer.Initialization do
   defp enforce_monotonicity(fitted) do
     pairs = [{1, 2}, {2, 3}, {3, 4}, {1, 3}, {2, 4}, {1, 4}]
 
-    Enum.reduce(pairs, fitted, fn {small, big}, acc ->
-      with {small_stability, small_count} <- Map.get(acc, small),
-           {big_stability, big_count} <- Map.get(acc, big),
-           true <- small_stability > big_stability do
-        if small_count > big_count do
-          Map.put(acc, big, {small_stability, big_count})
-        else
-          Map.put(acc, small, {big_stability, small_count})
-        end
-      else
-        _ -> acc
-      end
-    end)
+    Enum.reduce(pairs, fitted, &reconcile_pair(&2, &1))
+  end
+
+  # If the lower rating fitted higher, the pair collapses onto whichever value
+  # more observations back. Pairs with a rating missing are left alone.
+  defp reconcile_pair(fitted, {small, big}) do
+    case {Map.get(fitted, small), Map.get(fitted, big)} do
+      {{small_stability, small_count}, {big_stability, big_count}}
+      when small_stability > big_stability and small_count > big_count ->
+        Map.put(fitted, big, {small_stability, big_count})
+
+      {{small_stability, small_count}, {big_stability, _big_count}}
+      when small_stability > big_stability ->
+        Map.put(fitted, small, {big_stability, small_count})
+
+      _ ->
+        fitted
+    end
   end
 
   defp fill_missing(fitted, defaults) do

@@ -115,6 +115,151 @@ defmodule ExFsrs.OptimizerTest do
     end
   end
 
+  describe "predictions/2 and evaluate/2" do
+    test "score every review that counts for the loss, and only those", ctx do
+      predictions = Optimizer.predictions(ctx.sequences, ExFsrs.Scheduler.new().parameters)
+
+      assert length(predictions) == Data.num_reviews(ctx.sequences)
+
+      for {prediction, outcome, delta_t, index, lapses} <- predictions do
+        assert prediction > 0.0 and prediction <= 1.0
+        assert outcome in [0.0, 1.0]
+        assert delta_t >= 1
+        assert index >= 2
+        assert lapses >= 0
+      end
+    end
+
+    test "counts a lapse only once it has happened" do
+      logs = [
+        {1, :good, ~U[2024-01-01 09:00:00Z]},
+        {1, :again, ~U[2024-01-03 09:00:00Z]},
+        {1, :good, ~U[2024-01-05 09:00:00Z]}
+      ]
+
+      assert [{_p1, 0.0, 2, 2, 0}, {_p2, 1.0, 2, 3, 1}] =
+               Optimizer.predictions(logs, ExFsrs.Scheduler.new().parameters)
+    end
+
+    test "evaluate reports log loss consistent with batch_loss", ctx do
+      parameters = ExFsrs.Scheduler.new().parameters
+      report = Optimizer.evaluate(ctx.sequences, parameters)
+
+      assert report.reviews == Data.num_reviews(ctx.sequences)
+      assert_in_delta report.log_loss, Optimizer.batch_loss(ctx.sequences, parameters), 1.0e-9
+      assert report.rmse_bins > 0.0 and report.rmse_bins < 1.0
+    end
+
+    test "optimized parameters improve both metrics on the reference collection", ctx do
+      defaults = Optimizer.evaluate(ctx.sequences, ExFsrs.Scheduler.new().parameters)
+      optimized = Optimizer.evaluate(ctx.sequences, ctx.trace["final_parameters"])
+
+      assert optimized.log_loss < defaults.log_loss
+      assert optimized.rmse_bins < defaults.rmse_bins
+    end
+  end
+
+  # A small collection — just over the training threshold — so a full run with
+  # every option switched on stays fast enough to sit in the default suite.
+  defp small_collection do
+    seed = :rand.seed_s(:exsss, {4, 8, 15})
+
+    {logs, _seed} = Enum.map_reduce(1..70, seed, &card_history/2)
+
+    List.flatten(logs)
+  end
+
+  # Twelve reviews of one card, a random rating and a 1-6 day gap each.
+  defp card_history(card_id, seed) do
+    start = ~U[2024-01-01 09:00:00Z]
+
+    {reviews, {_day, seed}} =
+      Enum.map_reduce(0..11, {0, seed}, fn index, {day, seed} ->
+        {roll, seed} = :rand.uniform_s(10, seed)
+        {gap, seed} = :rand.uniform_s(6, seed)
+        day = if index == 0, do: 0, else: day + gap
+
+        {{card_id, rating_for(roll), DateTime.add(start, day, :day)}, {day, seed}}
+      end)
+
+    {reviews, seed}
+  end
+
+  defp rating_for(roll) when roll <= 2, do: :again
+  defp rating_for(roll) when roll <= 4, do: :hard
+  defp rating_for(roll) when roll <= 8, do: :good
+  defp rating_for(_roll), do: :easy
+
+  describe "compute_optimal_parameters/2 with the upgrades enabled" do
+    @tag timeout: 300_000
+    test "initialize, regularization and recency all take effect and stay in bounds" do
+      logs = small_collection()
+      sequences = Data.build_sequences(logs)
+      assert Data.num_reviews(sequences) >= 512
+
+      # Pin the card order so the two runs differ only in their options.
+      card_ids = Enum.map(sequences, fn {card_id, _reviews} -> card_id end)
+      orders = List.duplicate(card_ids, 5)
+
+      plain = Optimizer.compute_optimal_parameters(logs, card_orders: orders)
+
+      upgraded =
+        Optimizer.compute_optimal_parameters(logs,
+          card_orders: orders,
+          initialize: true,
+          regularization: 1.0,
+          recency: true
+        )
+
+      assert Enum.count_until(upgraded, 22) == 21
+      assert upgraded != plain
+      assert upgraded != ExFsrs.Scheduler.new().parameters
+
+      for {{value, lower}, upper} <-
+            Enum.zip(Enum.zip(upgraded, Optimizer.lower_bounds()), Optimizer.upper_bounds()) do
+        assert value >= lower and value <= upper
+      end
+
+      # The first four weights start from a fit of the data rather than the
+      # defaults, so initialization alone must move them.
+      initialized =
+        Optimizer.compute_optimal_parameters(logs, card_orders: orders, initialize: true)
+
+      assert Enum.take(initialized, 4) != Enum.take(plain, 4)
+    end
+
+    test "the scalar and batched models agree with recency weights applied" do
+      logs = small_collection()
+      sequences = Data.build_sequences(logs, recency: true)
+      card_ids = Enum.map(sequences, fn {card_id, _reviews} -> card_id end)
+      orders = List.duplicate(card_ids, 5)
+
+      steps = fn model ->
+        {:ok, agent} = Agent.start_link(fn -> [] end)
+
+        Optimizer.compute_optimal_parameters(logs,
+          card_orders: orders,
+          recency: true,
+          model: model,
+          on_step: fn step -> Agent.update(agent, &[step.loss | &1]) end
+        )
+
+        losses = agent |> Agent.get(& &1) |> Enum.reverse()
+        Agent.stop(agent)
+        losses
+      end
+
+      batched = steps.(:batched)
+      scalar = steps.(:scalar)
+
+      assert length(batched) == length(scalar)
+
+      for {b, s} <- Enum.zip(batched, scalar) do
+        assert_in_delta b, s, abs(s) * 1.0e-10
+      end
+    end
+  end
+
   describe "compute_optimal_parameters/2" do
     test "returns the defaults unchanged when there is too little data" do
       start = ~U[2024-01-01 09:00:00Z]

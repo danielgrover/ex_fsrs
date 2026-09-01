@@ -92,12 +92,12 @@ defmodule ExFsrs.ReviewLogTest do
         "review_duration" => 1000
       }
 
-      assert_raise RuntimeError, ~r/Invalid ISO8601 datetime format/, fn ->
+      assert_raise ArgumentError, ~r/invalid ISO 8601 datetime for review_datetime/, fn ->
         ExFsrs.ReviewLog.from_map(map)
       end
     end
 
-    test "defaults to DateTime.utc_now() when review_datetime is nil" do
+    test "raises when review_datetime is missing rather than inventing one" do
       card_map = %{
         "card_id" => 12_345,
         "state" => "review",
@@ -115,8 +115,9 @@ defmodule ExFsrs.ReviewLogTest do
         "review_duration" => nil
       }
 
-      log = ExFsrs.ReviewLog.from_map(map)
-      assert %DateTime{} = log.review_datetime
+      assert_raise ArgumentError, ~r/invalid datetime for review_datetime: nil/, fn ->
+        ExFsrs.ReviewLog.from_map(map)
+      end
     end
 
     test "passes through already-parsed DateTime values" do
@@ -143,7 +144,7 @@ defmodule ExFsrs.ReviewLogTest do
       assert log.review_datetime == now
     end
 
-    test "defaults rating to :good when value is not atom or string" do
+    test "raises on a rating it does not recognise instead of guessing" do
       now_iso = DateTime.to_iso8601(DateTime.utc_now())
 
       card_map = %{
@@ -163,8 +164,11 @@ defmodule ExFsrs.ReviewLogTest do
         "review_duration" => nil
       }
 
-      log = ExFsrs.ReviewLog.from_map(map)
-      assert log.rating == :good
+      for bad <- [42, "ok", :meh] do
+        assert_raise ArgumentError, ~r/invalid rating/, fn ->
+          ExFsrs.ReviewLog.from_map(Map.put(map, "rating", bad))
+        end
+      end
     end
 
     test "creates review log from map with atom keys" do
@@ -196,7 +200,7 @@ defmodule ExFsrs.ReviewLogTest do
       assert log.review_duration == 1000
     end
 
-    test "creates default card when card data is nil" do
+    test "raises when the card is missing rather than inventing one" do
       now_iso = DateTime.to_iso8601(DateTime.utc_now())
 
       map = %{
@@ -206,9 +210,16 @@ defmodule ExFsrs.ReviewLogTest do
         "review_duration" => nil
       }
 
-      log = ExFsrs.ReviewLog.from_map(map)
-      assert %ExFsrs{} = log.card
-      assert log.card.state == :learning
+      assert_raise ArgumentError, ~r/invalid card: nil/, fn ->
+        ExFsrs.ReviewLog.from_map(map)
+      end
+    end
+
+    test "accepts an already-built card struct" do
+      card = ExFsrs.new(card_id: 5, due: ~U[2024-01-01 00:00:00Z])
+      log = ExFsrs.ReviewLog.from_map(%{card: card, rating: :easy, review_datetime: card.due})
+
+      assert log.card == card
     end
   end
 end

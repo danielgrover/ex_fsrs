@@ -11,6 +11,8 @@ if Code.ensure_loaded?(Nx) do
 
     Here the timestep loop is a `while` generator, so the graph is a fixed size
     regardless of sequence length and a compiler has something small to work on.
+    The per-timestep arithmetic is the batched model's `step_columns`, called
+    from inside the loop; only the loop itself lives here.
 
     Two rules make this work, both learned the hard way:
 
@@ -184,16 +186,8 @@ if Code.ensure_loaded?(Nx) do
           {total, stability, difficulty, has_state} =
             step(
               params,
-              ratings[i],
-              elapsed[i],
-              labels[i],
-              scored[i],
-              weights[i],
-              valid[i],
-              total,
-              stability,
-              difficulty,
-              has_state
+              {ratings[i], elapsed[i], labels[i], scored[i], weights[i], valid[i]},
+              {total, stability, difficulty, has_state}
             )
 
           {params, ratings, elapsed, labels, scored, weights, valid, total, stability, difficulty,
@@ -203,138 +197,9 @@ if Code.ensure_loaded?(Nx) do
       {total, stability, difficulty}
     end
 
-    defnp step(
-            params,
-            rating,
-            elapsed,
-            label,
-            scored,
-            weight,
-            valid,
-            total,
-            stability,
-            difficulty,
-            has_state
-          ) do
-      retrievability = retrievability(params, stability, elapsed)
-
-      # A same-day or padding lane predicts exactly 1.0, and log(1 - 1) is -inf.
-      # The value is clamped, but the gradient of the log there is not, and a
-      # zero mask turns infinity into NaN. Substituting a benign prediction
-      # before the log keeps the discarded lanes finite.
-      scored? = Nx.equal(scored, 1)
-      safe = Nx.select(scored?, retrievability, f64(0.5))
-      total = total + Nx.sum(binary_cross_entropy(safe, label) * scored * weight)
-
-      first? = Nx.equal(has_state, 0)
-      same_day? = Nx.less(elapsed, 1)
-
-      next_stability =
-        Nx.select(
-          first?,
-          initial_stability(params, rating),
-          Nx.select(
-            same_day?,
-            short_term_stability(params, stability, rating),
-            long_term_stability(params, difficulty, stability, retrievability, rating)
-          )
-        )
-
-      next_difficulty =
-        Nx.select(
-          first?,
-          initial_difficulty(params, rating),
-          next_difficulty(params, difficulty, rating)
-        )
-
-      valid? = Nx.equal(valid, 1)
-
-      {total, Nx.select(valid?, next_stability, stability),
-       Nx.select(valid?, next_difficulty, difficulty), Nx.max(has_state, valid)}
-    end
-
-    # A bare float literal would become an f32 constant and lose precision before
-    # being promoted, which shifts retrievability in the 8th decimal place.
-    deftransformp(f64(value), do: Nx.tensor(value, type: :f64))
-
-    defnp binary_cross_entropy(prediction, label) do
-      log_p = Nx.max(Nx.log(prediction), f64(-100.0))
-      log_1_p = Nx.max(Nx.log(1 - prediction), f64(-100.0))
-
-      -(label * log_p + (1 - label) * log_1_p)
-    end
-
-    defnp retrievability(params, stability, elapsed) do
-      decay = -params[20]
-      factor = Nx.pow(f64(0.9), 1 / decay) - 1
-      days = Nx.as_type(Nx.max(elapsed, 0), :f64)
-
-      Nx.pow(1 + factor * days / stability, decay)
-    end
-
-    defnp initial_stability(params, rating) do
-      Nx.max(Nx.take(params, rating - 1), f64(0.001))
-    end
-
-    defnp initial_difficulty(params, rating) do
-      Nx.clip(initial_difficulty_unclamped(params, Nx.as_type(rating, :f64)), f64(1.0), f64(10.0))
-    end
-
-    defnp initial_difficulty_unclamped(params, rating) do
-      params[4] - Nx.exp(params[5] * (rating - 1)) + 1
-    end
-
-    defnp next_difficulty(params, difficulty, rating) do
-      rating = Nx.as_type(rating, :f64)
-      delta = -(params[6] * (rating - 3))
-      damped = (f64(10.0) - difficulty) * delta / f64(9.0)
-
-      arg1 = initial_difficulty_unclamped(params, f64(4.0))
-      arg2 = difficulty + damped
-
-      Nx.clip(params[7] * arg1 + (1 - params[7]) * arg2, f64(1.0), f64(10.0))
-    end
-
-    defnp short_term_stability(params, stability, rating) do
-      rating_f = Nx.as_type(rating, :f64)
-
-      increase =
-        Nx.exp(params[17] * (rating_f - 3 + params[18])) * Nx.pow(stability, -params[19])
-
-      # A successful same-day review must never shrink stability.
-      increase = Nx.select(Nx.not_equal(rating, 1), Nx.max(increase, f64(1.0)), increase)
-
-      Nx.max(stability * increase, f64(0.001))
-    end
-
-    defnp long_term_stability(params, difficulty, stability, retrievability, rating) do
-      forget = forget_stability(params, difficulty, stability, retrievability)
-      recall = recall_stability(params, difficulty, stability, retrievability, rating)
-
-      Nx.max(Nx.select(Nx.equal(rating, 1), forget, recall), f64(0.001))
-    end
-
-    defnp forget_stability(params, difficulty, stability, retrievability) do
-      long_term =
-        params[11] * Nx.pow(difficulty, -params[12]) *
-          (Nx.pow(stability + 1, params[13]) - 1) *
-          Nx.exp((1 - retrievability) * params[14])
-
-      short_term = stability / Nx.exp(params[17] * params[18])
-
-      Nx.min(long_term, short_term)
-    end
-
-    defnp recall_stability(params, difficulty, stability, retrievability, rating) do
-      hard_penalty = Nx.select(Nx.equal(rating, 2), params[15], f64(1.0))
-      easy_bonus = Nx.select(Nx.equal(rating, 4), params[16], f64(1.0))
-
-      increase =
-        Nx.exp(params[8]) * (11 - difficulty) * Nx.pow(stability, -params[9]) *
-          (Nx.exp((1 - retrievability) * params[10]) - 1) *
-          hard_penalty * easy_bonus
-
-      stability * (1 + increase)
-    end
+    # `Batched.step_columns/3` is ordinary Elixir built from `Nx` calls, which
+    # is exactly what `defn` traces, so the loop body is shared rather than
+    # rewritten in operator syntax.
+    deftransformp(step(params, columns, state), do: Batched.step_columns(params, columns, state))
   end
 end

@@ -1,3 +1,9 @@
+# Needs an Nx carrying the `while` f64 gradient fix (bench/NX_WHILE_GRAD_F64.md):
+# this script trains with `model: :loop` for speed, and stock Nx computes wrong
+# gradients through `while`. Point EX_FSRS_NX_PATH at a patched checkout before
+# `mix deps.get`; on stock Nx the optimizer refuses `:loop` rather than train on
+# bad gradients, and the script stops with that error.
+#
 # How much does the same configuration vary between runs?
 #
 # The optimizer shuffles card order per epoch, so two runs of identical settings
@@ -54,5 +60,6 @@ spreads =
 IO.puts("\nrun-to-run spread on identical settings:")
 IO.puts("  median #{Float.round(Enum.at(Enum.sort(spreads), div(length(spreads), 2)), 3)}%")
 IO.puts("  max    #{Float.round(Enum.max(spreads), 3)}%")
-IO.puts("\nFor comparison, the largest mean difference between any two variants")
-IO.puts("across 23 collections was 2.33%.")
+IO.puts("\nFor comparison, the largest difference between any two variants in")
+IO.puts("bench/temporal_eval.exs is about 2%, so a spread this size must be pinned")
+IO.puts("(via :card_orders) before variants can be compared.")

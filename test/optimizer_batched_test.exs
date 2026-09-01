@@ -155,6 +155,27 @@ defmodule ExFsrs.Optimizer.Model.BatchedTest do
       assert_in_delta num(actual), num(expected), abs(num(expected)) * 1.0e-12
     end
 
+    test "per-review weights scale the loss identically in both models", ctx do
+      chunk = hd(ctx.chunks)
+
+      weighted =
+        Enum.map(chunk, fn segment ->
+          reviews =
+            Enum.with_index(segment.reviews, fn review, index ->
+              %{review | weight: 0.25 + rem(index, 4) * 0.25}
+            end)
+
+          %{segment | reviews: reviews}
+        end)
+
+      {unweighted, _} = Optimizer.scalar_chunk_loss(ctx.params, chunk, nil)
+      {expected, _} = Optimizer.scalar_chunk_loss(ctx.params, weighted, nil)
+      {actual, _s, _d} = Batched.run(ctx.params, Batched.prepare(weighted, nil))
+
+      refute_in_delta num(expected), num(unweighted), 1.0e-6
+      assert_in_delta num(actual), num(expected), abs(num(expected)) * 1.0e-12
+    end
+
     test "agreement holds at parameters far from the defaults", ctx do
       # Guards against agreement that only holds near the defaults.
       params = Nx.tensor(ctx.trace["final_parameters"], type: :f64)
